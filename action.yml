@@ -1,0 +1,29 @@
+---
+name: run-github-actions
+description: test
+author: OpenTelekomCloud Ecosystem squad
+runs:
+  using: composite
+  steps:
+    - name: Process inputs
+      id: inputs
+      shell: bash
+      run: |
+        if [[ -n "${{ inputs.working_directory }}" ]]; then
+          echo "working_directory=${{ inputs.working_directory }}" >> $GITHUB_OUTPUT
+        else
+          echo "working_directory=${{ github.workspace }}" >> $GITHUB_OUTPUT
+        fi
+    
+    # Due to GHA limitation, caching works only for files within GITHUB_WORKSPACE
+    # folder, so we are forced to stick this temporary file inside .git, so it
+    # will not affect the linted repository.
+    # https://github.com/actions/toolkit/issues/1035
+    # https://github.com/actions/setup-python/issues/361
+    - name: Set up Python
+      if: inputs.setup_python == 'true'
+      uses: actions/setup-python@v5
+      with:
+        cache: pip
+        cache-dependency-path: ${{ github.workspace }}/.git/test-requirements.txt
+        python-version: "3.11"
