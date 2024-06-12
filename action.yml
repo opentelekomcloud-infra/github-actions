@@ -1,29 +1,21 @@
 ---
-name: run-github-actions
-description: test
+name: run-github-merge
+description: 'Automatically merges a pull request into a protected branch'
 author: OpenTelekomCloud Ecosystem squad
+inputs:
+  github_token:
+    description: 'GitHub token for authentication'
+    required: true
+  base_branch:
+    description: 'The branch to merge into'
+    required: true
+  pr_number:
+    description: 'The pull request number to merge'
+    required: true
 runs:
-  using: composite
-  steps:
-    - name: Process inputs
-      id: inputs
-      shell: bash
-      run: |
-        if [[ -n "${{ inputs.working_directory }}" ]]; then
-          echo "working_directory=${{ inputs.working_directory }}" >> $GITHUB_OUTPUT
-        else
-          echo "working_directory=${{ github.workspace }}" >> $GITHUB_OUTPUT
-        fi
-    
-    # Due to GHA limitation, caching works only for files within GITHUB_WORKSPACE
-    # folder, so we are forced to stick this temporary file inside .git, so it
-    # will not affect the linted repository.
-    # https://github.com/actions/toolkit/issues/1035
-    # https://github.com/actions/setup-python/issues/361
-    - name: Set up Python
-      if: inputs.setup_python == 'true'
-      uses: actions/setup-python@v5
-      with:
-        cache: pip
-        cache-dependency-path: ${{ github.workspace }}/.git/test-requirements.txt
-        python-version: "3.11"
+  using: docker
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.github_token }}
+    - ${{ inputs.base_branch }}
+    - ${{ inputs.pr_number }}
