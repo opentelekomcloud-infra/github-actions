@@ -1,3 +1,4 @@
+---
 name: Validate Workflows
 
 on:
@@ -6,6 +7,7 @@ on:
       - opened
       - reopened
       - synchronize
+      - edited
 
 jobs:
   validate:
@@ -16,24 +18,28 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    # 1️⃣ YAML Syntax-Check
+    # 1️⃣ YAML Syntax-Check (.yml + .yaml)
     - name: Install yamllint
       run: pip install yamllint
 
-    - name: Lint all workflow YAML files
-      run: yamllint .github/workflows/
+    - name: Lint workflow YAML files
+      run: |
+        yamllint .github/workflows/*.yml
+        yamllint .github/workflows/*.yaml || true
 
     # 2️⃣ Install act for dry-run
     - name: Install act
       run: |
         curl -s https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
 
-    # 3️⃣ Dry-Run der Workflows
+    # 3️⃣ Dry-Run der Workflows (.yml + .yaml)
     - name: Validate workflows with act
       run: |
-        for wf in .github/workflows/*.yml; do
-          # Validator sich selbst überspringen
-          if [[ "$wf" == *"validate-templates.yml" ]]; then
+        for wf in .github/workflows/*.{yml,yaml}; do
+          # Skip if no files match
+          [ -e "$wf" ] || continue
+          # Skip the validator itself
+          if [[ "$wf" == *"workflow-validator.yaml" ]]; then
             continue
           fi
           echo "Validating $wf ..."

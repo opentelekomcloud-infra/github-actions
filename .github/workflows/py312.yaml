@@ -1,3 +1,4 @@
+---
 name: Run tox -e py312
 
 on:
