@@ -1,47 +1,22 @@
 ---
-name: Validate Workflows
+name: Lint GitHub Workflows
 
 on:
   pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - edited
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
-  validate:
-    name: Lint & Validate Workflow Templates
+  actionlint:
+    name: Run actionlint
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    # 1️⃣ YAML Syntax-Check (.yml + .yaml)
-    - name: Install yamllint
-      run: pip install yamllint
-
-    - name: Lint workflow YAML files
-      run: |
-        yamllint .github/workflows/*.yml
-        yamllint .github/workflows/*.yaml || true
-
-    # 2️⃣ Install act for dry-run
-    - name: Install act
-      run: |
-        curl -s https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
-
-    # 3️⃣ Dry-Run der Workflows (.yml + .yaml)
-    - name: Validate workflows with act
-      run: |
-        for wf in .github/workflows/*.{yml,yaml}; do
-          # Skip if no files match
-          [ -e "$wf" ] || continue
-          # Skip the validator itself
-          if [[ "$wf" == *"workflow-validator.yaml" ]]; then
-            continue
-          fi
-          echo "Validating $wf ..."
-          act --dryrun --workflows "$wf" || exit 1
-        done
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-check
+          fail_level: any

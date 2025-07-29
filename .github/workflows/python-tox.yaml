@@ -1,0 +1,39 @@
+---
+name: Python Tox Test
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version to use for tox"
+        required: false
+        default: "3.12"
+        type: string
+      tox-env:
+        description: "Tox environment to run"
+        required: false
+        default: "py312"
+        type: string
+      verbose:
+        description: "Verbosity level (-v, -vv)"
+        required: false
+        default: "-vv"
+        type: string
+
+jobs:
+  run-tox:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install tox
+        run: pip install tox
+
+      - name: Run tox
+        run: tox -e ${{ inputs.tox-env }} ${{ inputs.verbose }}
