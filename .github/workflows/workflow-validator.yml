@@ -1,0 +1,41 @@
+name: Validate Workflows
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+jobs:
+  validate:
+    name: Lint & Validate Workflow Templates
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    # 1️⃣ YAML Syntax-Check
+    - name: Install yamllint
+      run: pip install yamllint
+
+    - name: Lint all workflow YAML files
+      run: yamllint .github/workflows/
+
+    # 2️⃣ Install act for dry-run
+    - name: Install act
+      run: |
+        curl -s https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
+
+    # 3️⃣ Dry-Run der Workflows
+    - name: Validate workflows with act
+      run: |
+        for wf in .github/workflows/*.yml; do
+          # Validator sich selbst überspringen
+          if [[ "$wf" == *"validate-templates.yml" ]]; then
+            continue
+          fi
+          echo "Validating $wf ..."
+          act --dryrun --workflows "$wf" || exit 1
+        done
