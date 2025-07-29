@@ -1,38 +1,14 @@
 ---
-name: Python Lint
-
-on:
-  workflow_call:
-    inputs:
-      python-versions:
-        description: "Comma-separated list of Python versions for linting"
-        required: false
-        default: "3.8,3.9,3.12"
-        type: string
-      linter:
-        description: "Linter to use (flake8, pylint, etc.)"
-        required: false
-        default: "flake8"
-        type: string
+name: python-lint
 
 jobs:
   lint:
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
-        python-version: ${{ fromJson(format('["{0}"]', join(split(inputs.python-versions, ','), '","'))) }}
-
+        python-version: [3.8, 3.9, 3.12]
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: advanced-security/python-lint-code-scanning-action@v1
         with:
+          linter: flake8
           python-version: ${{ matrix.python-version }}
-
-      - name: Install linter
-        run: pip install ${{ inputs.linter }}
-
-      - name: Run Linter
-        run: ${{ inputs.linter }} .
