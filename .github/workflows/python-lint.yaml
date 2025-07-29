@@ -1,6 +1,9 @@
 ---
 name: python-lint
 
+on:
+  workflow_call:
+
 jobs:
   lint:
     runs-on: ubuntu-latest
