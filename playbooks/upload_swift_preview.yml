@@ -8,7 +8,7 @@
         cloud:
           cloud: otc
         container: gitea_action_logs
-        prefix: elastic-cloud-server/{{ run_id }}
+        prefix: "{{ docs_service }}/{{ run_id }}"
         src: "{{ src_file }}"
         public: true
         delete_after: "604800"
