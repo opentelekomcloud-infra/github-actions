@@ -98,10 +98,12 @@ runs:
       env:
         RUN_ID: ${{ inputs.run_id }}
         SRC_FILE: docs.tar.gz
+        DOCS_SERVICE: ${{ inputs.docs_service }}
       run: |
         ansible-playbook -i localhost, -M ./library \
           -e "run_id=$RUN_ID" \
           -e "src_file=$SRC_FILE" \
+          -e "docs_service=$DOCS_SERVICE"
           playbooks/upload_swift_preview.yml
 
     - name: Comment on PR with container name
