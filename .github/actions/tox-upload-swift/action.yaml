@@ -53,6 +53,7 @@ runs:
       run: |
         tar -czf docs.tar.gz -C "${{ inputs.docs_path }}" .
         mkdir -p ./library
+        mkdir -p ./playbooks
         cp docs.tar.gz ./library/docs.tar.gz
         cp docs.tar.gz playbooks/docs.tar.gz
 
@@ -89,7 +90,6 @@ runs:
     - name: Clone up-to-date playbook
       shell: bash
       run: |
-        mkdir ./playbooks
         curl -sSL -o ./playbooks/upload_swift_preview.yml \
           https://raw.githubusercontent.com/opentelekomcloud-infra/github-actions/refs/heads/main/playbooks/upload_swift_preview.yml
 
