@@ -78,6 +78,13 @@ runs:
         curl -sSL -o ./library/upload_artifact_swift.py \
           https://raw.githubusercontent.com/opentelekomcloud-infra/otc-zuul-jobs/refs/heads/main/roles/upload-artifact-swift/library/upload_artifact_swift.py
 
+    - name: Clone up-to-date playbook
+      shell: bash
+      run: |
+        mkdir ./playbooks
+        curl -sSL -o ./playbooks/upload_swift_preview.yml \
+          https://raw.githubusercontent.com/opentelekomcloud-infra/github-actions/refs/heads/main/playbooks/upload_swift_preview.yml
+
     - name: Upload to Swift as preview
       shell: bash
       env:
