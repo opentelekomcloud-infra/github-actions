@@ -1,0 +1,108 @@
+name: "Upload Docs Preview to Swift"
+description: "Compresses documentation, uploads it to OpenTelekomCloud Swift, and comments on PR with preview link."
+
+inputs:
+  docs_path:
+    description: "Path to the built documentation directory"
+    required: false
+    default: "doc/build/html"
+  otc_swift_username:
+    description: "OpenTelekomCloud Swift username"
+    required: true
+  otc_swift_password:
+    description: "OpenTelekomCloud Swift password"
+    required: true
+  otc_swift_project_name:
+    description: "OpenTelekomCloud Swift project name"
+    required: true
+  otc_swift_domain:
+    description: "OpenTelekomCloud Swift domain"
+    required: true
+  otc_swift_endpoint:
+    description: "OpenTelekomCloud Swift endpoint"
+    required: true
+  gitea_token:
+    description: "Gitea API token (for commenting)"
+    required: true
+  gitea_server_url:
+    description: "Base URL of your Gitea server"
+    required: true
+  repo:
+    description: "Repository in owner/name format"
+    required: true
+  pr_number:
+    description: "Pull request number"
+    required: false
+  run_id:
+    description: "Unique run ID for naming preview container"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Compress documentation into .tar.gz
+      shell: bash
+      run: |
+        tar -czf docs.tar.gz -C "${{ inputs.docs_path }}" .
+        mkdir -p ./library
+        cp docs.tar.gz ./library/docs.tar.gz
+        cp docs.tar.gz playbooks/docs.tar.gz
+
+    - name: Write clouds.yaml
+      shell: bash
+      run: |
+        mkdir -p ~/.config/openstack
+        cat > ~/.config/openstack/clouds.yaml <<EOF
+        clouds:
+          otc:
+            profile: otc
+            auth:
+              auth_url: https://iam.eu-de.otc.t-systems.com:443/v3
+              username: ${{ inputs.otc_swift_username }}
+              password: ${{ inputs.otc_swift_password }}
+              project_name: ${{ inputs.otc_swift_project_name }}
+              user_domain_name: ${{ inputs.otc_swift_domain }}
+            interface: public
+            identity_api_version: 3
+            object_store_endpoint_override: ${{ inputs.otc_swift_endpoint }}
+        EOF
+
+    - name: Install dependencies for Swift upload
+      shell: bash
+      run: |
+        python -m pip install --quiet openstacksdk ansible requests requestsexceptions ansible
+
+    - name: Clone up-to-date upload script
+      shell: bash
+      run: |
+        curl -sSL -o ./library/upload_artifact_swift.py \
+          https://raw.githubusercontent.com/opentelekomcloud-infra/otc-zuul-jobs/refs/heads/main/roles/upload-artifact-swift/library/upload_artifact_swift.py
+
+    - name: Upload to Swift as preview
+      shell: bash
+      env:
+        RUN_ID: ${{ inputs.run_id }}
+        SRC_FILE: docs.tar.gz
+      run: |
+        ansible-playbook -i localhost, -M ./library \
+          -e "run_id=$RUN_ID" \
+          -e "src_file=$SRC_FILE" \
+          playbooks/upload_swift_preview.yml
+
+    - name: Comment on PR with container name
+      if: ${{ inputs.pr_number != '' }}
+      shell: bash
+      env:
+        GITEA_TOKEN: ${{ inputs.gitea_token }}
+        PREVIEW_URL: "${{ inputs.otc_swift_endpoint }}/gitea_action_logs/elastic-cloud-server/${{ inputs.run_id }}"
+        PR_NUMBER: ${{ inputs.pr_number }}
+        REPO: ${{ inputs.repo }}
+        GITEA_SERVER_URL: ${{ inputs.gitea_server_url }}
+      run: |
+        COMMENT_BODY="📦 Preview-Documentation uploaded to Swift: ${PREVIEW_URL}/"
+        curl -s \
+          -H "Authorization: token $GITEA_TOKEN" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d "{\"body\": \"$COMMENT_BODY\"}" \
+          "${GITEA_SERVER_URL}/api/v1/repos/${REPO}/issues/${PR_NUMBER}/comments"
