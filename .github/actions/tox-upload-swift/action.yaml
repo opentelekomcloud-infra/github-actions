@@ -6,6 +6,14 @@ inputs:
     description: "Path to the built documentation directory"
     required: false
     default: "doc/build/html"
+  docs_service:
+    description: "Service name to use in the preview URL (e.g., elastic-cloud-server)"
+    required: false
+    default: "elastic-cloud-server"
+  swift_container:
+    description: "Swift container name for storing docs (e.g., gitea_action_logs)"
+    required: false
+    default: "gitea_action_logs"
   otc_swift_username:
     description: "OpenTelekomCloud Swift username"
     required: true
@@ -101,7 +109,7 @@ runs:
       shell: bash
       env:
         GITEA_TOKEN: ${{ inputs.gitea_token }}
-        PREVIEW_URL: "${{ inputs.otc_swift_endpoint }}/gitea_action_logs/elastic-cloud-server/${{ inputs.run_id }}"
+        PREVIEW_URL: "${{ inputs.otc_swift_endpoint }}/${{ inputs.swift_container }}/${{ inputs.docs_service }}/${{ inputs.run_id }}"
         PR_NUMBER: ${{ inputs.pr_number }}
         REPO: ${{ inputs.repo }}
         GITEA_SERVER_URL: ${{ inputs.gitea_server_url }}
