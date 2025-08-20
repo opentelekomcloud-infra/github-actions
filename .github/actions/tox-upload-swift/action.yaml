@@ -103,7 +103,7 @@ runs:
         ansible-playbook -i localhost, -M ./library \
           -e "run_id=$RUN_ID" \
           -e "src_file=$SRC_FILE" \
-          -e "docs_service=$DOCS_SERVICE"
+          -e "docs_service=$DOCS_SERVICE" \
           playbooks/upload_swift_preview.yml
 
     - name: Comment on PR with container name
