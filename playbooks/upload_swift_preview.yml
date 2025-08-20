@@ -1,0 +1,14 @@
+- hosts: localhost
+  connection: local
+  vars:
+    run_id: "{{ run_id | default('manual-run') }}"
+  tasks:
+    - name: Upload compressed docs to Swift
+      upload_artifact_swift:
+        cloud:
+          cloud: otc
+        container: gitea_action_logs
+        prefix: elastic-cloud-server/{{ run_id }}
+        src: "{{ src_file }}"
+        public: true
+        delete_after: "604800"
