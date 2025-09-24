@@ -1,0 +1,82 @@
+name: "Get OTC IAM token"
+description: "Request an Open Telekom Cloud IAM token and expose it as output."
+inputs:
+  iam_url:
+    description: "IAM token endpoint"
+    required: false
+    default: "https://iam.eu-de.otc.t-systems.com/v3/auth/tokens"
+  os_username:
+    description: "OS_USERNAME"
+    required: true
+  os_password:
+    description: "OS_PASSWORD"
+    required: true
+  os_domain_name:
+    description: "OS_DOMAIN_NAME"
+    required: true
+  os_project_id:
+    description: "OS_PROJECT_ID"
+    required: true
+
+outputs:
+  auth_token:
+    description: "X-Subject-Token from IAM"
+    value: ${{ steps.request.outputs.auth_token }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: request
+      name: Request token
+      shell: bash
+      env:
+        IAM_URL: ${{ inputs.iam_url }}
+        OS_USERNAME: ${{ inputs.os_username }}
+        OS_PASSWORD: ${{ inputs.os_password }}
+        OS_DOMAIN_NAME: ${{ inputs.os_domain_name }}
+        OS_PROJECT_ID: ${{ inputs.os_project_id }}
+      run: |
+        set -euo pipefail
+
+        cat > body.json <<EOF
+        {
+          "auth": {
+            "identity": {
+              "methods": ["password"],
+              "password": {
+                "user": {
+                  "name": "${OS_USERNAME}",
+                  "password": "${OS_PASSWORD}",
+                  "domain": { "name": "${OS_DOMAIN_NAME}" }
+                }
+              }
+            },
+            "scope": {
+              "project": {
+                "id": "${OS_PROJECT_ID}"
+              }
+            }
+          }
+        }
+        EOF
+
+        headers="$(mktemp)"
+        code="$(curl -sS -w "%{http_code}" -o /dev/null -D "$headers" \
+          -H "Content-Type: application/json" \
+          -H "Accept: application/json" \
+          -X POST "$IAM_URL" \
+          -d @body.json)"
+
+        if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
+          echo "Request failed with HTTP $code" >&2
+          exit 1
+        fi
+
+        TOKEN="$(awk -F': ' 'BEGIN{IGNORECASE=1} /^X-Subject-Token/ {gsub("\r","",$2); print $2}' "$headers")"
+        if [[ -z "${TOKEN:-}" ]]; then
+          echo "No X-Subject-Token found" >&2
+          exit 1
+        fi
+
+        echo "::add-mask::$TOKEN"
+        echo "auth_token=$TOKEN" >> "$GITHUB_OUTPUT"
