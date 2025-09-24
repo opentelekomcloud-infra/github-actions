@@ -1,0 +1,39 @@
+name: "Run HCDC"
+description: "Install local hcdc and run it for PR vs base."
+inputs:
+  auth_token:
+    description: "IAM auth token from previous step"
+    required: true
+  pr_branch:
+    description: "PR branch name"
+    required: true
+  base_branch:
+    description: "Base branch name"
+    required: true
+  python-version:
+    description: "Python version to use"
+    required: false
+    default: "3.13"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install hcdc from PyPi
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        pip install hcdc
+
+    - name: Run hcdc
+      shell: bash
+      env:
+        AUTH_TOKEN: ${{ inputs.auth_token }}
+      run: |
+        set -euo pipefail
+        hcdc --branch "${{ inputs.pr_branch }}" --main-branch "origin/${{ inputs.base_branch }}"
