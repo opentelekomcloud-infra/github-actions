@@ -15,6 +15,11 @@ inputs:
     required: false
     default: "3.13"
 
+outputs:
+  hcdc_output:
+    description: "Output from HCDC run"
+    value: ${{ steps.hcdcoutput.outputs.hcdc_output }}
+
 runs:
   using: "composite"
   steps:
@@ -36,4 +41,11 @@ runs:
         AUTH_TOKEN: ${{ inputs.auth_token }}
       run: |
         set -euo pipefail
-        hcdc --branch "${{ inputs.pr_branch }}" --main-branch "origin/${{ inputs.base_branch }}"
+        hcdc --branch "${{ inputs.pr_branch }}" --main-branch "origin/${{ inputs.base_branch }}" --file-name hcdc.json
+
+    - name: Write output from HCDC to Github Output
+      id: hcdcoutput
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "hcdc_output=$(cat hcdc.json)" >> "$GITHUB_OUTPUT"
