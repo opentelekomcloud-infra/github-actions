@@ -44,6 +44,13 @@ inputs:
   run_id:
     description: "Unique run ID for naming preview container"
     required: true
+  ci_platform:
+    description: "Where this action runs: github or gitea"
+    required: false
+    default: "gitea"
+  github_token:
+    description: "GitHub token for commenting (optional; falls back to GITHUB_TOKEN env)"
+    required: false
 
 runs:
   using: "composite"
@@ -110,16 +117,35 @@ runs:
       if: ${{ inputs.pr_number != '' }}
       shell: bash
       env:
-        GITEA_TOKEN: ${{ inputs.gitea_token }}
+        CI_PLATFORM: ${{ inputs.ci_platform }}
         PREVIEW_URL: "${{ inputs.otc_swift_endpoint }}/${{ inputs.swift_container }}/${{ inputs.docs_service }}/${{ inputs.run_id }}"
         PR_NUMBER: ${{ inputs.pr_number }}
         REPO: ${{ inputs.repo }}
+        # gitea
+        GITEA_TOKEN: ${{ inputs.gitea_token }}
         GITEA_SERVER_URL: ${{ inputs.gitea_server_url }}
+        # github
+        INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        GITHUB_API_URL: ${{ env.GITHUB_API_URL }}
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
       run: |
+        set -euo pipefail
         COMMENT_BODY="📦 Preview-Documentation uploaded to Swift: ${PREVIEW_URL}/"
-        curl -s \
-          -H "Authorization: token $GITEA_TOKEN" \
-          -H "Content-Type: application/json" \
-          -X POST \
-          -d "{\"body\": \"$COMMENT_BODY\"}" \
-          "${GITEA_SERVER_URL}/api/v1/repos/${REPO}/issues/${PR_NUMBER}/comments"
+        if [ "${CI_PLATFORM}" = "github" ]; then
+          TOKEN="${INPUT_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+          API="${GITHUB_API_URL:-https://api.github.com}"
+          curl -s \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -X POST \
+            -d "{\"body\": \"${COMMENT_BODY}\"}" \
+            "${API}/repos/${REPO}/issues/${PR_NUMBER}/comments"
+        else
+          curl -s \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"body\": \"${COMMENT_BODY}\"}" \
+            "${GITEA_SERVER_URL}/api/v1/repos/${REPO}/issues/${PR_NUMBER}/comments"
+        fi
