@@ -7,7 +7,7 @@
       upload_artifact_swift:
         cloud:
           cloud: otc
-        container: gitea_action_logs
+        container: "{{ swift_container }}"
         prefix: "{{ docs_service }}/{{ run_id }}"
         src: "{{ src_file }}"
         public: true
