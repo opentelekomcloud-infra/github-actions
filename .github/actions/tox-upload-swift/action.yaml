@@ -126,14 +126,15 @@ runs:
         GITEA_SERVER_URL: ${{ inputs.gitea_server_url }}
         # github
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
-        GITHUB_API_URL: ${{ env.GITHUB_API_URL }}
-        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
       run: |
         set -euo pipefail
         COMMENT_BODY="📦 Preview-Documentation uploaded to Swift: ${PREVIEW_URL}/"
         if [ "${CI_PLATFORM}" = "github" ]; then
-          TOKEN="${INPUT_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
           API="${GITHUB_API_URL:-https://api.github.com}"
+          TOKEN="${INPUT_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+          if [ -z "${TOKEN}" ]; then
+            echo "No GitHub token available"; exit 1
+          fi
           curl -s \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Accept: application/vnd.github+json" \
