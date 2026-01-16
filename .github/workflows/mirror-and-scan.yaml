@@ -18,7 +18,7 @@ on:
       dependencytrack_project:
         description: "Dependency-Track project name"
         required: true
-        default: "quay.io/opentelekomcloud/dependencytrack-apiserver"
+        default: "opentelekomcloud/dependencytrack-apiserver"
 
 jobs:
   mirror_scan_upload:
@@ -72,6 +72,13 @@ jobs:
           output: bom.json
           exit-code: 0
           scanners: vuln
+    
+      - name: Validate bom.json looks sane
+        run: |
+            set -euo pipefail
+            ls -lah bom.json
+            head -c 200 bom.json; echo
+            jq -e '.bomFormat // .specVersion // .components' bom.json >/dev/null
 
       - name: Upload SBOM to Dependency-Track
         uses: DependencyTrack/gh-upload-sbom@v3
