@@ -89,4 +89,3 @@ jobs:
           projectVersion: ${{ inputs.source_tag }}
           bomFilename: bom.json
           autoCreate: true
-          projectTags: "mirror,dockerhub,quay,${{ inputs.source_image }},${{ inputs.source_tag }}"
