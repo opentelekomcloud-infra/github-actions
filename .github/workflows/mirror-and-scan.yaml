@@ -1,0 +1,85 @@
+name: Mirror DockerHub image to Quay + SBOM to Dependency-Track
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: "Docker Hub image (repo/name), e.g. grafana/grafana"
+        required: true
+        default: "dependencytrack/apiserver"
+      source_tag:
+        description: "Docker Hub tag, e.g. 12.1.2"
+        required: true
+        default: "4.13.5"
+      quay_repository:
+        description: "Quay repository (org/name), e.g. opentelekomcloud/grafana"
+        required: true
+        default: "opentelekomcloud/dependencytrack-apiserver"
+      dependencytrack_project:
+        description: "Dependency-Track project name"
+        required: true
+        default: "quay.io/opentelekomcloud/dependencytrack-apiserver"
+
+jobs:
+  mirror_scan_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set variables
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC_IMAGE="docker.io/${{ inputs.source_image }}:${{ inputs.source_tag }}"
+          DEST_IMAGE="quay.io/${{ inputs.quay_repository }}:${{ inputs.source_tag }}"
+          echo "src_image=${SRC_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "dest_image=${DEST_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Quay
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Pull from Docker Hub
+        run: |
+          docker pull "${{ steps.vars.outputs.src_image }}"
+
+      - name: Retag for Quay
+        run: |
+          docker tag "${{ steps.vars.outputs.src_image }}" "${{ steps.vars.outputs.dest_image }}"
+
+      - name: Push to Quay
+        run: |
+          docker push "${{ steps.vars.outputs.dest_image }}"
+
+      - name: Resolve pushed digest (immutable ref)
+        id: digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This prints e.g. quay.io/org/name@sha256:....
+          DIGEST_REF="$(docker inspect --format='{{index .RepoDigests 0}}' "${{ steps.vars.outputs.dest_image }}")"
+          echo "digest_ref=${DIGEST_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate CycloneDX SBOM with Trivy (from Quay digest)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: image
+          image-ref: "${{ steps.digest.outputs.digest_ref }}"
+          format: cyclonedx
+          output: bom.json
+          exit-code: 0
+          scanners: vuln
+
+      - name: Upload SBOM to Dependency-Track
+        uses: DependencyTrack/gh-upload-sbom@v3
+        with:
+          serverHostname: ${{ secrets.DEPENDENCYTRACK_PREPROD_HOSTNAME }}
+          apiKey: ${{ secrets.DEPENDENCYTRACK_PREPROD_APIKEY }}
+          projectName: ${{ inputs.dependencytrack_project }}
+          projectVersion: ${{ inputs.source_tag }}
+          bomFilename: bom.json
+          autoCreate: true
+          projectTags: "mirror,dockerhub,quay,${{ inputs.source_image }},${{ inputs.source_tag }}"
