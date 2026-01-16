@@ -1,4 +1,4 @@
-name: Mirror DockerHub image to Quay + SBOM to Dependency-Track
+name: Mirror DockerHub image to Quay and to Dependency-Track
 
 on:
   workflow_dispatch:
