@@ -1,4 +1,4 @@
-name: Mirror DockerHub image to Quay + SBOM to Dependency-Track
+name: Mirror DockerHub image to Quay and to Dependency-Track
 
 on:
   workflow_dispatch:
@@ -66,6 +66,7 @@ jobs:
       - name: Generate CycloneDX SBOM with Trivy (from Quay digest)
         uses: aquasecurity/trivy-action@0.33.1
         with:
+          version: "v0.68.2"
           scan-type: image
           image-ref: "${{ steps.digest.outputs.digest_ref }}"
           format: cyclonedx
