@@ -82,11 +82,13 @@ jobs:
             jq -e '.bomFormat // .specVersion // .components' bom.json >/dev/null
 
       - name: Upload SBOM to Dependency-Track
-        uses: DependencyTrack/gh-upload-sbom@v3
-        with:
-          serverHostname: ${{ secrets.DEPENDENCYTRACK_PREPROD_HOSTNAME }}
-          apiKey: ${{ secrets.DEPENDENCYTRACK_PREPROD_APIKEY }}
-          projectName: ${{ inputs.dependencytrack_project }}
-          projectVersion: ${{ inputs.source_tag }}
-          bomFilename: bom.json
-          autoCreate: true
+        shell: bash
+        run: |
+            set -euo pipefail
+            DT_URL="https://${{ secrets.DEPENDENCYTRACK_PREPROD_HOSTNAME }}"
+            curl -sS -X POST "${DT_URL}/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DEPENDENCYTRACK_PREPROD_APIKEY }}" \
+            -F "autoCreate=true" \
+            -F "projectName=${{ inputs.quay_repository }}" \
+            -F "projectVersion=${{ github.ref_name }}" \
+            -F "bom=@bom.json"
