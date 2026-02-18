@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SRC_IMAGE="docker.io/${{ inputs.source_image }}:${{ inputs.source_tag }}"
+          SRC_IMAGE="${{ inputs.source_image }}:${{ inputs.source_tag }}"
           DEST_IMAGE="quay.io/${{ inputs.quay_repository }}:${{ inputs.source_tag }}"
           echo "src_image=${SRC_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "dest_image=${DEST_IMAGE}" >> "$GITHUB_OUTPUT"
