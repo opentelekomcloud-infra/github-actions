@@ -64,7 +64,7 @@ jobs:
           echo "digest_ref=${DIGEST_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Generate CycloneDX SBOM with Trivy (from Quay digest)
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           version: "v0.68.2"
           scan-type: image
