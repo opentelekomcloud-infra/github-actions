@@ -33,7 +33,7 @@ jobs:
             fi
 
             PAGE_REPOS=$(echo "$RESP" | jq --arg org "$ORG" '[.repositories[].name | $org + "/" + .]')
-            ALL_REPOS=$(echo "$ALL_REPOS $PAGE_REPOS" | jq '.[0] + .[1]')
+            ALL_REPOS=$(jq -n --argjson a "$ALL_REPOS" --argjson b "$PAGE_REPOS" '$a + $b')
 
             HAS_NEXT=$(echo "$RESP" | jq -r '.has_next')
             if [ "$HAS_NEXT" != "true" ]; then
