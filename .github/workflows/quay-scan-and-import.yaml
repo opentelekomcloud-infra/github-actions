@@ -5,6 +5,8 @@ on:
 
 jobs:
   list_repositories:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
       repositories: ${{ steps.set-repos.outputs.repositories }}
@@ -48,6 +50,8 @@ jobs:
 
   scan_and_upload:
     needs: list_repositories
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 3
