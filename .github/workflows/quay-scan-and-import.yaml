@@ -19,9 +19,9 @@ jobs:
           ORG="opentelekomcloud"
           USER="${{ secrets.QUAY_USERNAME }}"
           PASS="${{ secrets.QUAY_PASSWORD }}"
-          REPOS=()
           PAGE=1
           PAGE_SIZE=100
+          ALL_REPOS="[]"
 
           while true; do
             RESP=$(curl -sS "https://quay.io/api/v1/repository/${ORG}/?limit=${PAGE_SIZE}&page=${PAGE}" \
@@ -32,9 +32,8 @@ jobs:
               break
             fi
 
-            for REPO in $(echo "$RESP" | jq -r '.repositories[].name'); do
-              REPOS+=("${ORG}/${REPO}")
-            done
+            PAGE_REPOS=$(echo "$RESP" | jq --arg org "$ORG" '[.repositories[].name | $org + "/" + .]')
+            ALL_REPOS=$(echo "$ALL_REPOS $PAGE_REPOS" | jq '.[0] + .[1]')
 
             HAS_NEXT=$(echo "$RESP" | jq -r '.has_next')
             if [ "$HAS_NEXT" != "true" ]; then
@@ -43,10 +42,9 @@ jobs:
             PAGE=$((PAGE + 1))
           done
 
-          echo "Found ${#REPOS[@]} repositories"
+          echo "Found $(echo "$ALL_REPOS" | jq 'length') repositories"
 
-          JSON=$(printf '%s\n' "${REPOS[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
-          echo "repositories=${JSON}" >> "$GITHUB_OUTPUT"
+          echo "repositories=${ALL_REPOS}" >> "$GITHUB_OUTPUT"
 
   scan_and_upload:
     needs: list_repositories
