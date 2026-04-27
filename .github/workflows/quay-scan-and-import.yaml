@@ -162,5 +162,3 @@ jobs:
             -F "projectName=${{ matrix.repository }}" \
             -F "projectVersion=${{ steps.tag.outputs.tag }}" \
             -F "bom=@bom.json")
-
-          echo "Response for ${{ matrix.repository }}:${{ steps.tag.outputs.tag }}: ${RESPONSE}"
