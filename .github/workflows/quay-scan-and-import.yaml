@@ -20,7 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           
-          ACCESS_TOKEN="${{ secrets.QUAY_OAUTH_TOKEN }}"
+          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
           PAGE=1
           PAGE_SIZE=100
           ALL_REPOS="[]"
@@ -79,7 +79,7 @@ jobs:
           NAMESPACE=$(echo "$REPO" | cut -d'/' -f1)
           REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
           
-          ACCESS_TOKEN="${{ secrets.QUAY_OAUTH_TOKEN }}"
+          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
 
           TAG=$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             "https://quay.io/api/v1/repository/${NAMESPACE}/${REPO_NAME}/tag?limit=1" \
