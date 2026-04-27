@@ -24,6 +24,7 @@ jobs:
           PAGE=1
           PAGE_SIZE=100
           ALL_REPOS="[]"
+          REPO_PREFIX="${QUAY_NAMESPACE}"
 
           while true; do
             RESP=$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
@@ -34,8 +35,8 @@ jobs:
               break
             fi
 
-            # Build compact JSON array — no newlines, no trailing commas
-            PAGE_REPOS=$(echo "$RESP" | jq -c '[.repositories[].name] | map("${QUAY_NAMESPACE}/" + .)')
+            PAGE_REPOS=$(echo "$RESP" | jq -c --arg prefix "$REPO_PREFIX" \
+              '[.repositories[].name] | map($prefix + "/" + .)')
             
             ALL_REPOS=$(jq -cn --argjson a "$ALL_REPOS" --argjson b "$PAGE_REPOS" '$a + $b')
 
@@ -47,8 +48,6 @@ jobs:
           done
 
           echo "Found $(echo "$ALL_REPOS" | jq 'length') repositories"
-
-          # Write compact JSON to GITHUB_OUTPUT (single line, no newlines)
           echo "repositories=${ALL_REPOS}" >> "$GITHUB_OUTPUT"
 
   scan_and_upload:
