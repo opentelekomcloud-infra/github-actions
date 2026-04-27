@@ -1,0 +1,128 @@
+name: Scan and Import All Quay Images to Dependency-Track
+
+on:
+  workflow_dispatch:
+
+jobs:
+  list_repositories:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      repositories: ${{ steps.set-repos.outputs.repositories }}
+    steps:
+      - name: List Quay repositories
+        id: set-repos
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORG="opentelekomcloud"
+          USER="${{ secrets.QUAY_USERNAME }}"
+          PASS="${{ secrets.QUAY_PASSWORD }}"
+          REPOS=()
+          PAGE=1
+          PAGE_SIZE=100
+
+          while true; do
+            RESP=$(curl -sS "https://quay.io/api/v1/repository/${ORG}/?limit=${PAGE_SIZE}&page=${PAGE}" \
+              -u "${USER}:${PASS}")
+
+            COUNT=$(echo "$RESP" | jq -r '.repositories | length')
+            if [ "$COUNT" -eq 0 ]; then
+              break
+            fi
+
+            for REPO in $(echo "$RESP" | jq -r '.repositories[].name'); do
+              REPOS+=("${ORG}/${REPO}")
+            done
+
+            HAS_NEXT=$(echo "$RESP" | jq -r '.has_next')
+            if [ "$HAS_NEXT" != "true" ]; then
+              break
+            fi
+            PAGE=$((PAGE + 1))
+          done
+
+          echo "Found ${#REPOS[@]} repositories"
+
+          JSON=$(printf '%s\n' "${REPOS[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
+          echo "repositories=${JSON}" >> "$GITHUB_OUTPUT"
+
+  scan_and_upload:
+    needs: list_repositories
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 3
+      fail-fast: false
+      matrix:
+        repository: ${{ fromJSON(needs.list_repositories.outputs.repositories) }}
+    continue-on-error: true
+    steps:
+      - name: Login to Quay
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Get latest tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${{ matrix.repository }}"
+          USER="${{ secrets.QUAY_USERNAME }}"
+          PASS="${{ secrets.QUAY_PASSWORD }}"
+
+          TAG=$(curl -sS "https://quay.io/api/v1/repository/${REPO}/tag/?limit=1" \
+            -u "${USER}:${PASS}" | jq -r '.tags[0].name' 2>/dev/null || true)
+
+          if [ -z "$TAG" ]; then
+            echo "No tags found for ${REPO}, skipping"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Latest tag for ${REPO}: ${TAG}"
+
+      - name: Pull image
+        if: steps.tag.outputs.skipped != 'true'
+        run: |
+          docker pull "quay.io/${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
+
+      - name: Generate CycloneDX SBOM with Trivy
+        if: steps.tag.outputs.skipped != 'true'
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          version: "v0.68.2"
+          scan-type: image
+          image-ref: "quay.io/${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
+          format: cyclonedx
+          output: bom.json
+          exit-code: 0
+          scanners: vuln
+
+      - name: Validate bom.json
+        if: steps.tag.outputs.skipped != 'true'
+        run: |
+          set -euo pipefail
+          ls -lah bom.json
+          head -c 200 bom.json; echo
+          jq -e '.bomFormat // .specVersion // .components' bom.json >/dev/null
+
+      - name: Upload SBOM to Dependency-Track
+        if: steps.tag.outputs.skipped != 'true'
+        shell: bash
+        run: |
+          DT_URL="https://${{ secrets.DEPENDENCYTRACK_PREPROD_HOSTNAME }}"
+          RESPONSE=$(curl -sS -X POST "${DT_URL}/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DEPENDENCYTRACK_PREPROD_APIKEY }}" \
+            -F "autoCreate=true" \
+            -F "projectName=${{ matrix.repository }}" \
+            -F "projectVersion=${{ steps.tag.outputs.tag }}" \
+            -F "bom=@bom.json")
+
+          echo "Response for ${{ matrix.repository }}:${{ steps.tag.outputs.tag }}: ${RESPONSE}"
