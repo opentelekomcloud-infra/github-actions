@@ -137,7 +137,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: image
-          image-ref: "${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
+          image-ref: "quay.io/${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
           format: cyclonedx
           output: bom.json
           exit-code: 0
