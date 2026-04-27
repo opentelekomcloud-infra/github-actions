@@ -3,6 +3,9 @@ name: Scan and Import All Quay Images to Dependency-Track
 on:
   workflow_dispatch:
 
+env:
+  QUAY_NAMESPACE: opentelekomcloud
+
 jobs:
   list_repositories:
     permissions:
@@ -16,23 +19,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ORG="opentelekomcloud"
-          USER="${{ secrets.QUAY_USERNAME }}"
-          PASS="${{ secrets.QUAY_PASSWORD }}"
+          
+          # Quay API requires OAuth 2 token from an Application (not robot credentials)
+          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
           PAGE=1
           PAGE_SIZE=100
           ALL_REPOS="[]"
 
           while true; do
-            RESP=$(curl -sS "https://quay.io/api/v1/repository/${ORG}/?limit=${PAGE_SIZE}&page=${PAGE}" \
-              -u "${USER}:${PASS}")
+            RESP=$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              "https://quay.io/api/v1/repository?namespace=${QUAY_NAMESPACE}&limit=${PAGE_SIZE}&page=${PAGE}")
 
             COUNT=$(echo "$RESP" | jq -r '.repositories | length')
             if [ "$COUNT" -eq 0 ]; then
               break
             fi
 
-            PAGE_REPOS=$(echo "$RESP" | jq --arg org "$ORG" '[.repositories[].name | $org + "/" + .]')
+            PAGE_REPOS=$(echo "$RESP" | jq -r '.repositories[].name' | while read -r repo; do
+              echo "${QUAY_NAMESPACE}/${repo}"
+            done | jq -R . | jq -s .)
+            
             ALL_REPOS=$(jq -n --argjson a "$ALL_REPOS" --argjson b "$PAGE_REPOS" '$a + $b')
 
             HAS_NEXT=$(echo "$RESP" | jq -r '.has_next')
@@ -43,7 +49,6 @@ jobs:
           done
 
           echo "Found $(echo "$ALL_REPOS" | jq 'length') repositories"
-
           echo "repositories=${ALL_REPOS}" >> "$GITHUB_OUTPUT"
 
   scan_and_upload:
@@ -58,7 +63,7 @@ jobs:
         repository: ${{ fromJSON(needs.list_repositories.outputs.repositories) }}
     continue-on-error: true
     steps:
-      - name: Login to Quay
+      - name: Login to Quay (for Docker pull)
         uses: docker/login-action@v3
         with:
           registry: quay.io
@@ -71,11 +76,15 @@ jobs:
         run: |
           set -euo pipefail
           REPO="${{ matrix.repository }}"
-          USER="${{ secrets.QUAY_USERNAME }}"
-          PASS="${{ secrets.QUAY_PASSWORD }}"
+          NAMESPACE=$(echo "$REPO" | cut -d'/' -f1)
+          REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+          
+          # Use OAuth token for API calls
+          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
 
-          TAG=$(curl -sS "https://quay.io/api/v1/repository/${REPO}/tag/?limit=1" \
-            -u "${USER}:${PASS}" | jq -r '.tags[0].name' 2>/dev/null || true)
+          TAG=$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            "https://quay.io/api/v1/repository/${NAMESPACE}/${REPO_NAME}/tag?limit=1" \
+            | jq -r '.tags[0].name' 2>/dev/null || true)
 
           if [ -z "$TAG" ]; then
             echo "No tags found for ${REPO}, skipping"
@@ -89,7 +98,7 @@ jobs:
       - name: Pull image
         if: steps.tag.outputs.skipped != 'true'
         run: |
-          docker pull "quay.io/${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
+          docker pull "${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
 
       - name: Generate CycloneDX SBOM with Trivy
         if: steps.tag.outputs.skipped != 'true'
@@ -97,7 +106,7 @@ jobs:
         with:
           version: "v0.68.2"
           scan-type: image
-          image-ref: "quay.io/${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
+          image-ref: "${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
           format: cyclonedx
           output: bom.json
           exit-code: 0
