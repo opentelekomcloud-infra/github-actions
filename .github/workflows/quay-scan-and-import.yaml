@@ -20,8 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Quay API requires OAuth 2 token from an Application (not robot credentials)
-          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
+          ACCESS_TOKEN="${{ secrets.QUAY_OAUTH_TOKEN }}"
           PAGE=1
           PAGE_SIZE=100
           ALL_REPOS="[]"
@@ -35,11 +34,10 @@ jobs:
               break
             fi
 
-            PAGE_REPOS=$(echo "$RESP" | jq -r '.repositories[].name' | while read -r repo; do
-              echo "${QUAY_NAMESPACE}/${repo}"
-            done | jq -R . | jq -s .)
+            # Build compact JSON array — no newlines, no trailing commas
+            PAGE_REPOS=$(echo "$RESP" | jq -c '[.repositories[].name] | map("${QUAY_NAMESPACE}/" + .)')
             
-            ALL_REPOS=$(jq -n --argjson a "$ALL_REPOS" --argjson b "$PAGE_REPOS" '$a + $b')
+            ALL_REPOS=$(jq -cn --argjson a "$ALL_REPOS" --argjson b "$PAGE_REPOS" '$a + $b')
 
             HAS_NEXT=$(echo "$RESP" | jq -r '.has_next')
             if [ "$HAS_NEXT" != "true" ]; then
@@ -49,6 +47,8 @@ jobs:
           done
 
           echo "Found $(echo "$ALL_REPOS" | jq 'length') repositories"
+
+          # Write compact JSON to GITHUB_OUTPUT (single line, no newlines)
           echo "repositories=${ALL_REPOS}" >> "$GITHUB_OUTPUT"
 
   scan_and_upload:
@@ -79,8 +79,7 @@ jobs:
           NAMESPACE=$(echo "$REPO" | cut -d'/' -f1)
           REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
           
-          # Use OAuth token for API calls
-          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
+          ACCESS_TOKEN="${{ secrets.QUAY_OAUTH_TOKEN }}"
 
           TAG=$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             "https://quay.io/api/v1/repository/${NAMESPACE}/${REPO_NAME}/tag?limit=1" \
