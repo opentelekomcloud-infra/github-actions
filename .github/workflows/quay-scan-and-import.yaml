@@ -91,7 +91,7 @@ jobs:
             
             # Use v2 API (Docker Registry API)
             # First, get a token for the repository
-            TOKEN=$(curl -s -u "${QUAY_USERNAME}:${QUAY_PASSWORD}" \
+            TOKEN=$(curl -s -u "${{secrets.QUAY_USERNAME}}:${{secrets.QUAY_PASSWORD}}" \
               "https://quay.io/v2/auth?scope=repository:${NAMESPACE}/${REPO_NAME}:pull&service=quay.io" \
               | jq -r '.token')
 
