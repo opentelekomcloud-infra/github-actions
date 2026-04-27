@@ -131,7 +131,7 @@ jobs:
       - name: Pull image
         if: steps.tag.outputs.skipped != 'true'
         run: |
-          docker pull "${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
+          docker pull "quay.io/${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
 
       - name: Generate CycloneDX SBOM with Trivy
         if: steps.tag.outputs.skipped != 'true'
