@@ -67,7 +67,7 @@ jobs:
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
 
       - name: Get latest tag
         id: tag
@@ -90,7 +90,7 @@ jobs:
             
             # Use v2 API (Docker Registry API)
             # First, get a token for the repository
-            TOKEN=$(curl -s -u "${{secrets.QUAY_USERNAME}}:${{secrets.QUAY_PASSWORD}}" \
+            TOKEN=$(curl -s -u "${{secrets.QUAY_USERNAME}}:${{secrets.QUAY_ROBOT_TOKEN}}" \
               "https://quay.io/v2/auth?scope=repository:${NAMESPACE}/${REPO_NAME}:pull&service=quay.io" \
               | jq -r '.token')
 
