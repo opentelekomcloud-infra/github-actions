@@ -156,9 +156,9 @@ jobs:
         shell: bash
         run: |
           DT_URL="https://${{ secrets.DEPENDENCYTRACK_PREPROD_HOSTNAME }}"
-          RESPONSE=$(curl -sS -X POST "${DT_URL}/api/v1/bom" \
+          curl -sS -X POST "${DT_URL}/api/v1/bom" \
             -H "X-Api-Key: ${{ secrets.DEPENDENCYTRACK_PREPROD_APIKEY }}" \
             -F "autoCreate=true" \
             -F "projectName=${{ matrix.repository }}" \
             -F "projectVersion=${{ steps.tag.outputs.tag }}" \
-            -F "bom=@bom.json")
+            -F "bom=@bom.json"
