@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  QUAY_NAMESPACE: opentelekomcloud
+  QUAY_NAMESPACE: ${{ secrets.QUAY_NAMESPACE }}
 
 jobs:
   list_repositories:
