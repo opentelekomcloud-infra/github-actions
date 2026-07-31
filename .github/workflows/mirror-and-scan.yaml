@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_image:
-        description: "Docker Hub image (repo/name), e.g. grafana/grafana"
+        description: "Docker Hub image (repo/name), e.g. grafana/grafana or full URL e.g. docker.umami.is/umami-software/umami"
         required: true
         default: "dependencytrack/apiserver"
       source_tag:
@@ -12,13 +12,13 @@ on:
         required: true
         default: "4.13.5"
       quay_repository:
-        description: "Quay repository (org/name), e.g. opentelekomcloud/grafana"
+        description: "Quay repository (org/name), e.g. myorg/grafana"
         required: true
-        default: "opentelekomcloud/dependencytrack-apiserver"
+        default: "myorg/grafana"
       dependencytrack_project:
-        description: "Dependency-Track project name"
+        description: "Dependency-Track project name, e.g. myorg/grafana"
         required: true
-        default: "opentelekomcloud/dependencytrack-apiserver"
+        default: "myorg/grafana"
 
 jobs:
   mirror_scan_upload:
@@ -40,7 +40,7 @@ jobs:
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
 
       - name: Pull from Docker Hub
         run: |
@@ -64,9 +64,8 @@ jobs:
           echo "digest_ref=${DIGEST_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Generate CycloneDX SBOM with Trivy (from Quay digest)
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
-          version: "v0.68.2"
           scan-type: image
           image-ref: "${{ steps.digest.outputs.digest_ref }}"
           format: cyclonedx

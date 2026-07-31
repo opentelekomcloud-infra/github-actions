@@ -3,6 +3,9 @@ name: Scan and Import All Quay Images to Dependency-Track
 on:
   workflow_dispatch:
 
+env:
+  QUAY_NAMESPACE: ${{ secrets.QUAY_NAMESPACE }}
+
 jobs:
   list_repositories:
     permissions:
@@ -16,25 +19,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ORG="opentelekomcloud"
-          USER="${{ secrets.QUAY_USERNAME }}"
-          PASS="${{ secrets.QUAY_PASSWORD }}"
-          REPOS=()
+          
+          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
           PAGE=1
           PAGE_SIZE=100
+          ALL_REPOS="[]"
+          REPO_PREFIX="${QUAY_NAMESPACE}"
 
           while true; do
-            RESP=$(curl -sS "https://quay.io/api/v1/repository/${ORG}/?limit=${PAGE_SIZE}&page=${PAGE}" \
-              -u "${USER}:${PASS}")
+            RESP=$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              "https://quay.io/api/v1/repository?namespace=${QUAY_NAMESPACE}&limit=${PAGE_SIZE}&page=${PAGE}")
 
             COUNT=$(echo "$RESP" | jq -r '.repositories | length')
             if [ "$COUNT" -eq 0 ]; then
               break
             fi
 
-            for REPO in $(echo "$RESP" | jq -r '.repositories[].name'); do
-              REPOS+=("${ORG}/${REPO}")
-            done
+            PAGE_REPOS=$(echo "$RESP" | jq -c --arg prefix "$REPO_PREFIX" \
+              '[.repositories[].name] | map($prefix + "/" + .)')
+            
+            ALL_REPOS=$(jq -cn --argjson a "$ALL_REPOS" --argjson b "$PAGE_REPOS" '$a + $b')
 
             HAS_NEXT=$(echo "$RESP" | jq -r '.has_next')
             if [ "$HAS_NEXT" != "true" ]; then
@@ -43,10 +47,8 @@ jobs:
             PAGE=$((PAGE + 1))
           done
 
-          echo "Found ${#REPOS[@]} repositories"
-
-          JSON=$(printf '%s\n' "${REPOS[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
-          echo "repositories=${JSON}" >> "$GITHUB_OUTPUT"
+          echo "Found $(echo "$ALL_REPOS" | jq 'length') repositories"
+          echo "repositories=${ALL_REPOS}" >> "$GITHUB_OUTPUT"
 
   scan_and_upload:
     needs: list_repositories
@@ -60,12 +62,12 @@ jobs:
         repository: ${{ fromJSON(needs.list_repositories.outputs.repositories) }}
     continue-on-error: true
     steps:
-      - name: Login to Quay
+      - name: Login to Quay (for Docker pull)
         uses: docker/login-action@v3
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
 
       - name: Get latest tag
         id: tag
@@ -73,20 +75,57 @@ jobs:
         run: |
           set -euo pipefail
           REPO="${{ matrix.repository }}"
-          USER="${{ secrets.QUAY_USERNAME }}"
-          PASS="${{ secrets.QUAY_PASSWORD }}"
+          NAMESPACE=$(echo "$REPO" | cut -d'/' -f1)
+          REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+          
+          ACCESS_TOKEN="${{ secrets.QUAY_TOKEN }}"
 
-          TAG=$(curl -sS "https://quay.io/api/v1/repository/${REPO}/tag/?limit=1" \
-            -u "${USER}:${PASS}" | jq -r '.tags[0].name' 2>/dev/null || true)
+          # Try v1 API first
+          TAG_RESPONSE=$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            "https://quay.io/api/v1/repository/${NAMESPACE}/${REPO_NAME}/tag?limit=1")
 
-          if [ -z "$TAG" ]; then
-            echo "No tags found for ${REPO}, skipping"
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Check if response is HTML (401/403 error)
+          if echo "$TAG_RESPONSE" | grep -qi "^<!DOCTYPE\|^<html\|^<body"; then
+            echo "v1 API returned HTML, falling back to v2 API..."
+            
+            # Use v2 API (Docker Registry API)
+            # First, get a token for the repository
+            TOKEN=$(curl -s -u "${{secrets.QUAY_USERNAME}}:${{secrets.QUAY_ROBOT_TOKEN}}" \
+              "https://quay.io/v2/auth?scope=repository:${NAMESPACE}/${REPO_NAME}:pull&service=quay.io" \
+              | jq -r '.token')
+
+            if [ -z "$TOKEN" ]; then
+              echo "Failed to get auth token, skipping"
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            # Fetch tags using v2 API
+            TAGS=$(curl -sS -H "Authorization: Bearer ${TOKEN}" \
+              "https://quay.io/v2/${NAMESPACE}/${REPO_NAME}/tags/list" \
+              | jq -r '.tags[-1]' 2>/dev/null || true)
+
+            if [ -z "$TAGS" ]; then
+              echo "No tags found for ${REPO}, skipping"
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "tag=${TAGS}" >> "$GITHUB_OUTPUT"
+            echo "Latest tag for ${REPO} (v2 API): ${TAGS}"
+          else
+            # Parse v1 API response
+            TAG=$(echo "$TAG_RESPONSE" | jq -r '.tags[0].name // empty' 2>/dev/null || true)
+
+            if [ -z "$TAG" ]; then
+              echo "No tags found for ${REPO}, skipping"
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "Latest tag for ${REPO}: ${TAG}"
           fi
-
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Latest tag for ${REPO}: ${TAG}"
 
       - name: Pull image
         if: steps.tag.outputs.skipped != 'true'
@@ -95,9 +134,8 @@ jobs:
 
       - name: Generate CycloneDX SBOM with Trivy
         if: steps.tag.outputs.skipped != 'true'
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
-          version: "v0.68.2"
           scan-type: image
           image-ref: "quay.io/${{ matrix.repository }}:${{ steps.tag.outputs.tag }}"
           format: cyclonedx
@@ -118,11 +156,9 @@ jobs:
         shell: bash
         run: |
           DT_URL="https://${{ secrets.DEPENDENCYTRACK_PREPROD_HOSTNAME }}"
-          RESPONSE=$(curl -sS -X POST "${DT_URL}/api/v1/bom" \
+          curl -sS -X POST "${DT_URL}/api/v1/bom" \
             -H "X-Api-Key: ${{ secrets.DEPENDENCYTRACK_PREPROD_APIKEY }}" \
             -F "autoCreate=true" \
             -F "projectName=${{ matrix.repository }}" \
             -F "projectVersion=${{ steps.tag.outputs.tag }}" \
-            -F "bom=@bom.json")
-
-          echo "Response for ${{ matrix.repository }}:${{ steps.tag.outputs.tag }}: ${RESPONSE}"
+            -F "bom=@bom.json"
