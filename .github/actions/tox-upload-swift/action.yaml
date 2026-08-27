@@ -29,6 +29,13 @@ inputs:
   otc_swift_endpoint:
     description: "OpenTelekomCloud Swift endpoint"
     required: true
+  swift_container_public:
+    description: >-
+      Whether the Swift container may be read anonymously. Set to "false" when
+      uploading into an internal account, otherwise the container is given
+      .r:*,.rlistings and the previews become world-readable.
+    required: false
+    default: "true"
   gitea_token:
     description: "Gitea API token (for commenting)"
     required: true
@@ -107,12 +114,14 @@ runs:
         SRC_FILE: docs.tar.gz
         DOCS_SERVICE: ${{ inputs.docs_service }}
         SWIFT_CONTAINER: ${{ inputs.swift_container }}
+        SWIFT_CONTAINER_PUBLIC: ${{ inputs.swift_container_public }}
       run: |
         ansible-playbook -i localhost, -M ./library \
           -e "run_id=$RUN_ID" \
           -e "src_file=$SRC_FILE" \
           -e "docs_service=$DOCS_SERVICE" \
           -e "swift_container=$SWIFT_CONTAINER" \
+          -e "swift_container_public=$SWIFT_CONTAINER_PUBLIC" \
           playbooks/upload_swift_preview.yml
 
     - name: Comment on PR with container name
