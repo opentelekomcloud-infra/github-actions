@@ -100,13 +100,16 @@ runs:
     - name: Clone up-to-date upload script
       shell: bash
       run: |
-        curl -sSL -o ./library/upload_artifact_swift.py \
-          https://raw.githubusercontent.com/opentelekomcloud-infra/otc-zuul-jobs/refs/heads/main/roles/upload-artifact-swift/library/upload_artifact_swift.py
+        set -euo pipefail
+        # -f matters: without it curl writes the 404 body into the module file.
+        curl -sSLf -o ./library/upload_artifact_swift.py \
+          https://raw.githubusercontent.com/opentelekomcloud-infra/github-actions/refs/heads/main/library/upload_artifact_swift.py
 
     - name: Clone up-to-date playbook
       shell: bash
       run: |
-        curl -sSL -o ./playbooks/upload_swift_preview.yml \
+        set -euo pipefail
+        curl -sSLf -o ./playbooks/upload_swift_preview.yml \
           https://raw.githubusercontent.com/opentelekomcloud-infra/github-actions/refs/heads/main/playbooks/upload_swift_preview.yml
 
     - name: Upload to Swift as preview
