@@ -22,6 +22,7 @@ Utility to upload files to swift
 import io
 import logging
 import tarfile
+import time
 import traceback
 
 import openstack
@@ -75,6 +76,30 @@ def iter_chunks(src, max_bytes):
             yield buf.getvalue(), count
 
 
+def put_chunk(cloud, path, headers, payload, expected, retries):
+    """PUT one chunk, retrying while the extraction comes back short.
+
+    Observed in production: identically sized chunks mostly extract in
+    seconds, but one occasionally stalls for minutes and Swift reports
+    e.g. "created 465 of 553" plus a 499 Client Disconnect. Re-sending the
+    same archive overwrites whatever landed, so a retry is safe and
+    recovers the tail instead of failing the whole publish.
+    """
+    result = {}
+    created = 0
+    errors = []
+    for attempt in range(retries + 1):
+        if attempt:
+            time.sleep(2 ** (attempt - 1))
+        response = cloud.object_store.put(path, headers=headers, data=payload)
+        result = response.json()
+        created = result.get('Number Files Created', 0)
+        errors = result.get('Errors') or []
+        if created == expected and not errors:
+            break
+    return result, created, errors
+
+
 def main():
     module = AnsibleModule(
         argument_spec=dict(
@@ -85,7 +110,8 @@ def main():
             public=dict(type='bool', default=True),
             read_acl=dict(type='str'),
             delete_after=dict(type='int', default=0),
-            chunk_bytes=dict(type='int', default=8388608),
+            chunk_bytes=dict(type='int', default=4194304),
+            chunk_retries=dict(type='int', default=2),
         )
     )
 
@@ -118,27 +144,24 @@ def main():
         if p["delete_after"] > 0:
             headers["X-Delete-After"] = str(p["delete_after"])
 
+        path = "{}/{}?extract-archive=tar.gz".format(
+            p['container'],
+            p['prefix'],
+        )
         for payload, expected in iter_chunks(p['src'], p['chunk_bytes']):
-            response = cloud.object_store.put(
-                "{}/{}?extract-archive=tar.gz".format(
-                    p['container'],
-                    p['prefix'],
-                ),
-                headers=headers,
-                data=payload
-            )
-            result = response.json()
+            result, created, errors = put_chunk(
+                cloud, path, headers, payload, expected, p['chunk_retries'])
             # Swift reports per-file extraction problems in the body, not
             # via the HTTP status, so a 200 here can still mean a partial
             # upload.
             extract_status = result.get('Response Status', '')
-            created = result.get('Number Files Created', 0)
             files_created += created
             if created != expected:
                 failures.append({
                     "file": "<chunk>",
-                    "error": "created %s of %s files" % (created, expected)})
-            for error in result.get('Errors') or []:
+                    "error": "created %s of %s files after %s attempts"
+                             % (created, expected, p['chunk_retries'] + 1)})
+            for error in errors:
                 failures.append({
                     "file": error[0],
                     "error": error[1]})
