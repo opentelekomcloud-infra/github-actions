@@ -19,7 +19,9 @@ __metaclass__ = type
 Utility to upload files to swift
 """
 
+import io
 import logging
+import tarfile
 import traceback
 
 import openstack
@@ -39,6 +41,40 @@ def get_cloud(cloud):
         return openstack.connect(cloud=cloud)
 
 
+def iter_chunks(src, max_bytes):
+    """Yield (payload, file_count) tar.gz blobs of at most max_bytes of content.
+
+    A whole docs tree in one extract-archive request is answered with a
+    truncated body once the archive gets large (~48 MB reproduced a 12-byte
+    reply), which silently loses the tail of the tree.
+    """
+    with tarfile.open(src, 'r:gz') as source:
+        buf = io.BytesIO()
+        out = tarfile.open(fileobj=buf, mode='w:gz')
+        size = 0
+        count = 0
+        for member in source:
+            if not member.isfile():
+                continue
+            extracted = source.extractfile(member)
+            if extracted is None:
+                continue
+            data = extracted.read()
+            out.addfile(member, io.BytesIO(data))
+            size += len(data)
+            count += 1
+            if size >= max_bytes:
+                out.close()
+                yield buf.getvalue(), count
+                buf = io.BytesIO()
+                out = tarfile.open(fileobj=buf, mode='w:gz')
+                size = 0
+                count = 0
+        out.close()
+        if count:
+            yield buf.getvalue(), count
+
+
 def main():
     module = AnsibleModule(
         argument_spec=dict(
@@ -49,6 +85,7 @@ def main():
             public=dict(type='bool', default=True),
             read_acl=dict(type='str'),
             delete_after=dict(type='int', default=0),
+            chunk_bytes=dict(type='int', default=8388608),
         )
     )
 
@@ -73,29 +110,34 @@ def main():
                 'X-Container-Meta-Access-Control-Allow-Origin': '*'
             })
 
-        with open(p['src'], 'rb') as f:
-            headers = {
-                "X-Detect-Content-Type": "true",
-                "Content-Type": "application/gzip",
-                "Accept": "application/json"
-            }
-            if p["delete_after"] > 0:
-                headers["X-Delete-After"] = str(p["delete_after"])
+        headers = {
+            "X-Detect-Content-Type": "true",
+            "Content-Type": "application/gzip",
+            "Accept": "application/json"
+        }
+        if p["delete_after"] > 0:
+            headers["X-Delete-After"] = str(p["delete_after"])
 
+        for payload, expected in iter_chunks(p['src'], p['chunk_bytes']):
             response = cloud.object_store.put(
                 "{}/{}?extract-archive=tar.gz".format(
                     p['container'],
                     p['prefix'],
                 ),
                 headers=headers,
-                data=f
+                data=payload
             )
             result = response.json()
             # Swift reports per-file extraction problems in the body, not
             # via the HTTP status, so a 200 here can still mean a partial
             # upload.
             extract_status = result.get('Response Status', '')
-            files_created = result.get('Number Files Created', 0)
+            created = result.get('Number Files Created', 0)
+            files_created += created
+            if created != expected:
+                failures.append({
+                    "file": "<chunk>",
+                    "error": "created %s of %s files" % (created, expected)})
             for error in result.get('Errors') or []:
                 failures.append({
                     "file": error[0],
