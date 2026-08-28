@@ -10,5 +10,6 @@
         container: "{{ swift_container }}"
         prefix: "{{ docs_service }}/{{ run_id }}"
         src: "{{ src_file }}"
-        public: true
+        # Defaults to true so callers that do not pass it are unaffected.
+        public: "{{ swift_container_public | default(true) | bool }}"
         delete_after: "604800"
