@@ -31,11 +31,13 @@ inputs:
     required: true
   swift_container_public:
     description: >-
-      Whether the Swift container may be read anonymously. Set to "false" when
-      uploading into an internal account, otherwise the container is given
-      .r:*,.rlistings and the previews become world-readable.
+      Whether the Swift container may be read anonymously. Leave unset to derive
+      it from ci_platform: gitea uploads go to an internal account and default to
+      "false", everything else defaults to "true". Set explicitly to override.
+      The account itself comes from the OTC_SWIFT_PROJECT_NAME secret and is not
+      visible here, which is why the platform is used as the proxy for it.
     required: false
-    default: "true"
+    default: ""
   gitea_token:
     description: "Gitea API token (for commenting)"
     required: true
@@ -115,13 +117,19 @@ runs:
         DOCS_SERVICE: ${{ inputs.docs_service }}
         SWIFT_CONTAINER: ${{ inputs.swift_container }}
         SWIFT_CONTAINER_PUBLIC: ${{ inputs.swift_container_public }}
+        CI_PLATFORM: ${{ inputs.ci_platform }}
       run: |
+        set -euo pipefail
+        PUBLIC="${SWIFT_CONTAINER_PUBLIC}"
+        if [ -z "${PUBLIC}" ]; then
+          if [ "${CI_PLATFORM}" = "gitea" ]; then PUBLIC=false; else PUBLIC=true; fi
+        fi
         ansible-playbook -i localhost, -M ./library \
           -e "run_id=$RUN_ID" \
           -e "src_file=$SRC_FILE" \
           -e "docs_service=$DOCS_SERVICE" \
           -e "swift_container=$SWIFT_CONTAINER" \
-          -e "swift_container_public=$SWIFT_CONTAINER_PUBLIC" \
+          -e "swift_container_public=$PUBLIC" \
           playbooks/upload_swift_preview.yml
 
     - name: Comment on PR with container name
