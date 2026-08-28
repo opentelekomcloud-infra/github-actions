@@ -76,6 +76,31 @@ def iter_chunks(src, max_bytes):
             yield buf.getvalue(), count
 
 
+def authenticate(cloud, retries, timeout):
+    """Force authentication up front, bounded and retried.
+
+    IAM intermittently blackholes the connect (~4% of jobs). No timeout is
+    configured anywhere -- the otc profile sets none -- so the SDK blocks for
+    about six minutes and then kills the job. Bound only this phase: the
+    session timeout is restored afterwards so large chunk uploads, which
+    legitimately run for minutes, stay unbounded.
+    """
+    session = cloud.session
+    previous = session.timeout
+    session.timeout = timeout
+    try:
+        for attempt in range(retries + 1):
+            try:
+                session.get_token()
+                return
+            except keystoneauth1.exceptions.ConnectionError:
+                if attempt == retries:
+                    raise
+                time.sleep(2 ** attempt)
+    finally:
+        session.timeout = previous
+
+
 def put_chunk(cloud, path, headers, payload, expected, retries):
     """PUT one chunk, retrying while the extraction comes back short.
 
@@ -112,6 +137,8 @@ def main():
             delete_after=dict(type='int', default=0),
             chunk_bytes=dict(type='int', default=4194304),
             chunk_retries=dict(type='int', default=2),
+            auth_timeout=dict(type='int', default=30),
+            auth_retries=dict(type='int', default=3),
         )
     )
 
@@ -121,6 +148,7 @@ def main():
     extract_status = ''
     files_created = 0
     try:
+        authenticate(cloud, p['auth_retries'], p['auth_timeout'])
         container = cloud.get_container(p['container'])
         if not container:
             cloud.create_container(name=p['container'])
@@ -167,6 +195,7 @@ def main():
                     "error": error[1]})
 
     except (keystoneauth1.exceptions.http.HttpError,
+            keystoneauth1.exceptions.ConnectionError,
             requests.exceptions.RequestException):
         s = "Error uploading to %s.%s" % (cloud.name, cloud.config.region_name)
         logging.exception(s)
