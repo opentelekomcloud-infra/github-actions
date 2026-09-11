@@ -29,6 +29,14 @@ inputs:
   otc_swift_endpoint:
     description: "OpenTelekomCloud Swift endpoint"
     required: true
+  otc_swift_preview_endpoint:
+    description: >-
+      Optional endpoint used for the preview URL in the PR comment. The upload
+      itself always goes to otc_swift_endpoint; set this to the externally
+      reachable endpoint when otc_swift_endpoint points to an internal cluster
+      domain. Leave unset to reuse otc_swift_endpoint.
+    required: false
+    default: ""
   swift_container_public:
     description: >-
       Whether the Swift container may be read anonymously. Leave unset to derive
@@ -140,7 +148,11 @@ runs:
       shell: bash
       env:
         CI_PLATFORM: ${{ inputs.ci_platform }}
-        PREVIEW_URL: "${{ inputs.otc_swift_endpoint }}/${{ inputs.swift_container }}/${{ inputs.docs_service }}/${{ inputs.run_id }}"
+        SWIFT_ENDPOINT: ${{ inputs.otc_swift_endpoint }}
+        PREVIEW_ENDPOINT: ${{ inputs.otc_swift_preview_endpoint }}
+        SWIFT_CONTAINER: ${{ inputs.swift_container }}
+        DOCS_SERVICE: ${{ inputs.docs_service }}
+        RUN_ID: ${{ inputs.run_id }}
         PR_NUMBER: ${{ inputs.pr_number }}
         REPO: ${{ inputs.repo }}
         # gitea
@@ -150,6 +162,10 @@ runs:
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         set -euo pipefail
+        # Default to the upload endpoint for the comment URL; a separately
+        # supplied preview endpoint wins (e.g. external URL when the upload
+        # endpoint is an internal cluster domain).
+        PREVIEW_URL="${PREVIEW_ENDPOINT:-$SWIFT_ENDPOINT}/${SWIFT_CONTAINER}/${DOCS_SERVICE}/${RUN_ID}"
         COMMENT_BODY="📦 Preview-Documentation uploaded to Swift: ${PREVIEW_URL}/"
         if [ "${CI_PLATFORM}" = "github" ]; then
           API="${GITHUB_API_URL:-https://api.github.com}"
