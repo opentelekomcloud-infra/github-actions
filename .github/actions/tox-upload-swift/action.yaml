@@ -46,6 +46,16 @@ inputs:
       visible here, which is why the platform is used as the proxy for it.
     required: false
     default: ""
+  pdf_links:
+    description: >-
+      Whether the PR comment lists every PDF as a direct file link instead of
+      the folder preview URL. Directory listings are disabled on Swift, so a
+      folder URL only resolves for HTML builds that have an index.html; a
+      PDF-only build needs each file linked individually. Leave unset to
+      derive it from docs_path: true when docs_path ends in /pdf (e.g.
+      doc/build/pdf), false otherwise. Set "true"/"false" to override.
+    required: false
+    default: ""
   gitea_token:
     description: "Gitea API token (for commenting)"
     required: true
@@ -153,6 +163,8 @@ runs:
         SWIFT_CONTAINER: ${{ inputs.swift_container }}
         DOCS_SERVICE: ${{ inputs.docs_service }}
         RUN_ID: ${{ inputs.run_id }}
+        DOCS_PATH: ${{ inputs.docs_path }}
+        PDF_LINKS: ${{ inputs.pdf_links }}
         PR_NUMBER: ${{ inputs.pr_number }}
         REPO: ${{ inputs.repo }}
         # gitea
@@ -165,8 +177,45 @@ runs:
         # Default to the upload endpoint for the comment URL; a separately
         # supplied preview endpoint wins (e.g. external URL when the upload
         # endpoint is an internal cluster domain).
-        PREVIEW_URL="${PREVIEW_ENDPOINT:-$SWIFT_ENDPOINT}/${SWIFT_CONTAINER}/${DOCS_SERVICE}/${RUN_ID}"
-        COMMENT_BODY="📦 Preview-Documentation uploaded to Swift: ${PREVIEW_URL}/"
+        BASE_URL="${PREVIEW_ENDPOINT:-$SWIFT_ENDPOINT}/${SWIFT_CONTAINER}/${DOCS_SERVICE}/${RUN_ID}"
+        # PDF builds have no index.html, so the folder URL 404s. Link each
+        # PDF file directly instead. Defaults from docs_path: on for
+        # */pdf, off otherwise; the input overrides.
+        PDF_MODE="${PDF_LINKS}"
+        if [ -z "${PDF_MODE}" ]; then
+          case "${DOCS_PATH}" in */pdf|pdf) PDF_MODE=true ;; *) PDF_MODE=false ;; esac
+        fi
+        if [ "${PDF_MODE}" = "true" ]; then
+          # List files as paths relative to the docs root (slash-separated)
+          # and build one markdown link per PDF. Each path segment is
+          # percent-encoded but the slashes are kept literal: Swift resolves
+          # the whole remainder of the URL path as the object name, exactly
+          # like the web-index HTML preview does with its relative assets.
+          # Encoding the slashes as %2F would 404 on nested files.
+          BODY="$(cd "${DOCS_PATH}" && find . -type f -name '*.pdf' -print | sed 's|^\./||' | LC_ALL=C sort | python3 -c '
+        import sys
+        from urllib.parse import quote
+        base = sys.argv[1]
+        body = "📦 PDF Preview-Documentation uploaded to Swift:"
+        files = [line.strip() for line in sys.stdin if line.strip()]
+        if not files:
+            body += f"\n\nNo PDF files found in {base}/"
+        else:
+            # Blank line after the header: a list that directly follows a
+            # paragraph line is not rendered as a list by GFM (GitHub/Gitea),
+            # it folds into the paragraph as one line.
+            body += "\n"
+            for name in files:
+                encoded = "/".join(quote(seg, safe="") for seg in name.split("/"))
+                body += f"\n- [📄 {name}]({base}/{encoded})"
+        print(body)
+        ' "${BASE_URL}")"
+        else
+          BODY="📦 HTML Preview-Documentation uploaded to Swift: ${BASE_URL}/"
+        fi
+        # JSON-encode with python so multi-line bodies (the PDF list) survive
+        # the API payload; raw newlines in the inline -d string break it.
+        PAYLOAD="$(python3 -c 'import json,sys; print(json.dumps({"body": sys.stdin.read()}))' <<< "${BODY}")"
         if [ "${CI_PLATFORM}" = "github" ]; then
           API="${GITHUB_API_URL:-https://api.github.com}"
           curl -s \
@@ -174,13 +223,13 @@ runs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             -X POST \
-            -d "{\"body\": \"${COMMENT_BODY}\"}" \
+            -d "${PAYLOAD}" \
             "${API}/repos/${REPO}/issues/${PR_NUMBER}/comments"
         else
           curl -s \
             -H "Authorization: token ${GITEA_TOKEN}" \
             -H "Content-Type: application/json" \
             -X POST \
-            -d "{\"body\": \"${COMMENT_BODY}\"}" \
+            -d "${PAYLOAD}" \
             "${GITEA_SERVER_URL}/api/v1/repos/${REPO}/issues/${PR_NUMBER}/comments"
         fi
