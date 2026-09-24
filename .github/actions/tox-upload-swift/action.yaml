@@ -201,6 +201,10 @@ runs:
         if not files:
             body += f"\n\nNo PDF files found in {base}/"
         else:
+            # Blank line after the header: a list that directly follows a
+            # paragraph line is not rendered as a list by GFM (GitHub/Gitea),
+            # it folds into the paragraph as one line.
+            body += "\n"
             for name in files:
                 encoded = "/".join(quote(seg, safe="") for seg in name.split("/"))
                 body += f"\n- [📄 {name}]({base}/{encoded})"
