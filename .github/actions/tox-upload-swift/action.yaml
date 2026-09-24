@@ -196,7 +196,7 @@ runs:
         import sys
         from urllib.parse import quote
         base = sys.argv[1]
-        body = "📦 Preview-Documentation uploaded to Swift:"
+        body = "📦 PDF Preview-Documentation uploaded to Swift:"
         files = [line.strip() for line in sys.stdin if line.strip()]
         if not files:
             body += f"\n\nNo PDF files found in {base}/"
@@ -211,7 +211,7 @@ runs:
         print(body)
         ' "${BASE_URL}")"
         else
-          BODY="📦 Preview-Documentation uploaded to Swift: ${BASE_URL}/"
+          BODY="📦 HTML Preview-Documentation uploaded to Swift: ${BASE_URL}/"
         fi
         # JSON-encode with python so multi-line bodies (the PDF list) survive
         # the API payload; raw newlines in the inline -d string break it.
