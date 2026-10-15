@@ -47,10 +47,10 @@ def names_in(payload):
 
 
 class FakeResponse:
-    status_code = 201
-
-    def __init__(self, body):
+    def __init__(self, body, status_code=201, reason='Created'):
         self._body = body
+        self.status_code = status_code
+        self.reason = reason
 
     def json(self):
         if isinstance(self._body, Exception):
@@ -63,10 +63,11 @@ class FakeStore:
     its first heartbeat (more than `stall_above` files) lose their tail."""
 
     def __init__(self, stall_above=10 ** 6, mode='short', bad_names=(),
-                 stall_status='499 Client Disconnect'):
+                 stall_status='499 Client Disconnect', plain_fail=None):
         self.stall_above = stall_above
         self.mode = mode
         self.stall_status = stall_status
+        self.plain_fail = plain_fail
         self.bad_names = set(bad_names)
         self.calls = []
         self.sizes = []
@@ -76,6 +77,8 @@ class FakeStore:
         self.calls.append(
             {'path': path, 'kwargs': kwargs, 'headers': headers})
         if 'extract-archive' not in path:
+            if self.plain_fail is not None:
+                raise self.plain_fail
             self.stored.add(path)
             return FakeResponse({})
         names = names_in(data)
@@ -103,6 +106,11 @@ class FakeStore:
                            for n in names if n in self.bad_names]})
         if self.mode == 'list':
             return FakeResponse([])
+        if self.mode.startswith('http'):
+            # the SDK hands back the error response instead of raising
+            code = int(self.mode[4:])
+            return FakeResponse(ValueError('no JSON'), code,
+                                {401: 'Unauthorized', 503: 'Busy'}[code])
         if self.mode == 'garbage':
             return FakeResponse(ValueError('truncated body'))
         landed = names[:len(names) // 2]
@@ -247,14 +255,56 @@ def test_following_chunks_start_at_the_remembered_limit():
     assert outcome.budget == 8
 
 
-def test_lone_file_falls_back_to_plain_put():
+def test_stalled_pair_goes_straight_to_plain_puts():
     store = FakeStore(bad_names={'f001.html'}, mode='timeout')
     outcome = upload(store, members(2))
     assert outcome.failures == []
     assert outcome.created == 2
-    plain = [c['path'] for c in store.calls
-             if 'extract-archive' not in c['path']]
-    assert plain == ['box/svc/1/f001.html']
+    # one bulk attempt for the pair, then no single-file bulk attempts
+    assert [c['path'] for c in store.calls] == [
+        BULK_PATH, 'box/svc/1/f000.html', 'box/svc/1/f001.html']
+    assert outcome.budget == 7
+
+
+@pytest.fixture(autouse=True)
+def clear_stalls():
+    uas.STALLS.clear()
+
+
+def test_http_error_response_is_a_rejection_with_its_status():
+    store = FakeStore(mode='http401', stall_above=0)
+    outcome = upload(store, members(20))
+    assert outcome.created == 0
+    assert outcome.failures == [
+        {'file': '<chunk>',
+         'error': 'HTTP 401 Unauthorized: 20 files not uploaded'}]
+    # not retried, not halved, no budget spent
+    assert len(store.calls) == 1
+    assert outcome.budget == 8
+
+
+def test_transient_http_error_is_a_stall_with_the_cause_recorded():
+    store = FakeStore(mode='http503', stall_above=0)
+    outcome = upload(store, members(2))
+    # halved down to plain PUTs, which succeed
+    assert (outcome.created, outcome.failures) == (2, [])
+    assert uas.STALLS == [BULK_PATH + ': HTTP 503 Busy']
+
+
+def test_exception_cause_is_recorded():
+    store = FakeStore(mode='timeout', stall_above=0)
+    upload(store, members(2))
+    assert uas.STALLS == [BULK_PATH + ': ConnectTimeout: timed out']
+
+
+def test_plain_put_failure_names_the_cause():
+    store = FakeStore(
+        plain_fail=keystoneauth1.exceptions.ConnectFailure('boom'))
+    outcome = upload(store, members(1))
+    assert outcome.failures == [
+        {'file': 'box/svc/1/f000.html',
+         'error': 'plain PUT failed: ConnectFailure: boom'}]
+    assert outcome.budget == 7
 
 
 def test_gives_up_once_the_budget_is_spent():

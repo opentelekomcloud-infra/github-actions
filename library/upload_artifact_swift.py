@@ -121,6 +121,14 @@ def authenticate(cloud, retries, timeout):
 STALLED = (keystoneauth1.exceptions.ConnectionError,
            requests.exceptions.RequestException)
 
+# Why requests were given up on, in order; reported with the module result
+# so a failed job says what happened instead of just how often.
+STALLS = []
+
+
+def note_stall(target: str, cause: str):
+    STALLS.append('%s: %s' % (target, cause))
+
 
 # A stall never shrinks later archives below this many files: one slow
 # request must not turn the rest of the tree into single-file uploads.
@@ -158,10 +166,28 @@ def extract_archive(cloud, path: str, headers: dict, members: list,
         response = cloud.object_store.put(
             path, headers=headers, data=payload,
             timeout=timeout, connect_retries=0)
+    except STALLED as exc:
+        note_stall(path, '%s: %s' % (type(exc).__name__, exc))
+        return 0, [], '', 'stalled'
+    # The SDK does not raise on HTTP errors here (raise_exc=False), so a
+    # 401 after token expiry, a 403 or a 404 on the container would otherwise
+    # look like a truncated body and be halved down to nothing.
+    code = getattr(response, 'status_code', 200) or 200
+    if code >= 400:
+        reason = 'HTTP %s %s' % (code, getattr(response, 'reason', '') or '')
+        reason = reason.strip()
+        if is_rejection(['', str(code)]):
+            return 0, [['<chunk>', '%s: %d files not uploaded'
+                        % (reason, len(members))]], str(code), 'rejected'
+        note_stall(path, reason)
+        return 0, [], str(code), 'stalled'
+    try:
         result = response.json()
-    except STALLED + (ValueError,):
+    except ValueError as exc:
+        note_stall(path, 'unreadable response body: %s' % exc)
         return 0, [], '', 'stalled'
     if not isinstance(result, dict):
+        note_stall(path, 'unexpected response body: %r' % (result,))
         return 0, [], '', 'stalled'
     created = result.get('Number Files Created') or 0
     errors = result.get('Errors') or []
@@ -188,13 +214,17 @@ def put_object(cloud, object_prefix: str, headers: dict, member: tuple,
         response = cloud.object_store.put(
             path, headers=plain, data=data,
             timeout=timeout, connect_retries=0)
-        status = response.status_code
     except STALLED as exc:
-        status = type(exc).__name__
-    if status in (200, 201):
-        return Outcome(1, [], '201 Created', budget, limit)
+        cause = '%s: %s' % (type(exc).__name__, exc)
+    else:
+        if response.status_code in (200, 201):
+            return Outcome(1, [], '201 Created', budget, limit)
+        cause = 'HTTP %s %s' % (response.status_code,
+                                getattr(response, 'reason', '') or '')
+        cause = cause.strip()
+    note_stall(path, cause)
     return Outcome(
-        0, [{"file": path, "error": "plain PUT failed: %s" % status}],
+        0, [{"file": path, "error": "plain PUT failed: %s" % cause}],
         '', max(budget - 1, 0), limit)
 
 
@@ -215,12 +245,14 @@ def upload_members(cloud, bulk_path: str, object_prefix: str, headers: dict,
 
     So: bound the wait (the stall is silent, a read timeout catches it in
     `timeout` seconds instead of 600), then make the request cheaper rather
-    than repeat it. Halving ends at a single file sent as a plain object
-    PUT, which involves no bulk middleware. Re-sending files that already
-    landed overwrites them, so every step is idempotent. `budget` caps the
-    failed requests overall: a broken backend fails the job in minutes.
-    `limit` remembers the size that stalled, so the chunks that follow are
-    cut down up front instead of each paying for the same lesson.
+    than repeat it. A single file is never bulk-extracted at all: it goes
+    as a plain object PUT, which involves no bulk middleware and cannot
+    stall, so halving a slow pair costs no extra timeouts. Re-sending files
+    that already landed overwrites them, so every step is idempotent.
+    `budget` caps the failed requests overall: a broken backend fails the
+    job in minutes. `limit` remembers the size that stalled, so the chunks
+    that follow are cut down up front instead of each paying for the same
+    lesson.
     """
     limit = max(limit, 1)
     if budget <= 0:
@@ -228,6 +260,9 @@ def upload_members(cloud, bulk_path: str, object_prefix: str, headers: dict,
             "file": "<chunk>",
             "error": "%d files not uploaded: too many stalled requests"
                      % len(members)}], '', 0, limit)
+    if len(members) == 1:
+        return put_object(cloud, object_prefix, headers, members[0],
+                          timeout, budget, limit)
     if len(members) <= limit:
         created, errors, status, verdict = extract_archive(
             cloud, bulk_path, headers, members, timeout)
@@ -239,10 +274,6 @@ def upload_members(cloud, bulk_path: str, object_prefix: str, headers: dict,
                 [{"file": error[0], "error": error[1]} for error in errors],
                 status, budget, limit)
         budget -= 1
-        if len(members) == 1:
-            # Always worth one plain PUT, even on the last of the budget.
-            return put_object(cloud, object_prefix, headers, members[0],
-                              timeout, budget, limit)
         limit = min(limit, max(len(members) // 2, MIN_LIMIT))
     middle = (len(members) + 1) // 2
     first = upload_members(cloud, bulk_path, object_prefix, headers,
@@ -337,6 +368,9 @@ def main():
             cloud=cloud.name,
             region_name=cloud.config.region_name)
 
+    for stall in STALLS:
+        module.warn('Swift upload: ' + stall)
+
     if failures or not extract_status.startswith('20'):
         module.fail_json(
             changed=bool(files_created),
@@ -346,12 +380,14 @@ def main():
             upload_failures=failures,
             files_created=files_created,
             extract_status=extract_status,
+            stalls=STALLS,
         )
 
     module.exit_json(
         changed=True,
         files_created=files_created,
         upload_failures=failures,
+        stalls=STALLS,
     )
 
 
