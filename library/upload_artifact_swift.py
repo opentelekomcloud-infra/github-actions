@@ -134,7 +134,7 @@ def is_rejection(error) -> bool:
     5xx may be transient, so only the remaining 4xx count.
     """
     code = str(error[1])[:3]
-    return code.startswith('4') and code not in ('408', '499')
+    return code.startswith('4') and code not in ('408', '429', '498', '499')
 
 
 def object_name(member_name: str) -> str:
