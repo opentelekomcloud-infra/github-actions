@@ -178,8 +178,10 @@ def put_object(cloud, object_prefix: str, headers: dict, member: tuple,
                timeout: int, budget: int, limit: int) -> Outcome:
     """Plain object PUT: no bulk middleware involved, so it cannot stall."""
     info, data = member
+    # rstrip: with an empty prefix the bulk path is "container/", and the
+    # object must be "container/a.html", not "container//a.html".
     path = '%s/%s' % (
-        object_prefix, urllib.parse.quote(object_name(info.name)))
+        object_prefix.rstrip('/'), urllib.parse.quote(object_name(info.name)))
     plain = {key: value for key, value in headers.items()
              if key.lower() not in ('content-type', 'accept')}
     try:

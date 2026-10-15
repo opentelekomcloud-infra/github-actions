@@ -217,6 +217,15 @@ def test_plain_put_names_and_headers():
     assert store.calls[-1]['headers'] == {'X-Delete-After': '60'}
 
 
+def test_plain_put_with_empty_prefix_has_no_double_slash():
+    store = FakeStore(stall_above=0, mode='timeout')
+    outcome = uas.upload_members(
+        FakeCloud(store), 'box/?extract-archive=tar.gz', 'box/', HEADERS,
+        sized(members(1)), 60, 8, 100)
+    assert outcome.created == 1
+    assert store.calls[-1]['path'] == 'box/f000.html'
+
+
 @pytest.mark.parametrize('limit', [0, -5])
 def test_nonsense_limit_does_not_recurse_forever(limit):
     store = FakeStore()

@@ -1,0 +1,7 @@
+ansible-core
+flake8
+keystoneauth1
+openstacksdk
+pytest
+requests
+requestsexceptions
