@@ -413,6 +413,24 @@ def test_nightly_report_keeps_the_marker_when_the_scan_errored():
 # --- scan job steps ----------------------------------------------------------
 
 
+def test_scan_checks_out_the_pr_head_without_credentials():
+    # A base-commit checkout would scan the code before the PR, not the PR.
+    (checkout,) = [
+        s
+        for s in JOBS["scan"]["steps"]
+        if str(s.get("uses", "")).startswith("actions/checkout@")
+    ]
+    assert checkout["with"]["ref"] == "${{ needs.gate.outputs.head-sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert checkout["with"]["fetch-depth"] == 0
+
+
+def test_scan_job_runs_only_after_the_gate_admits_it():
+    assert JOBS["scan"]["needs"] == "gate"
+    assert JOBS["scan"]["if"] == "needs.gate.outputs.scan == 'true'"
+    assert JOBS["gate"]["runs-on"] == "ubuntu-latest"
+
+
 def run_summary(tmp_path, private, vulns):
     if vulns is not None:
         run_dir = tmp_path / "strix_runs" / "run-1"

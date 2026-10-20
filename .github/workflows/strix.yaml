@@ -166,9 +166,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Never checkout untrusted PR head code in this secret-bearing workflow.
-          # Use trusted base commit and compute PR diff via BASE/HEAD SHAs.
-          ref: ${{ needs.gate.outputs.base-sha }}
+          # The PR head is what Strix must scan; the gate admits same-repository PRs only, never forks.
+          ref: ${{ needs.gate.outputs.head-sha }}
           fetch-depth: 0
           # Strix mounts the checkout writable into its sandbox; no token may sit in .git/config.
           persist-credentials: false
