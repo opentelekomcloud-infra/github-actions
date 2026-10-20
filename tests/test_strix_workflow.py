@@ -73,9 +73,29 @@ def gate(env, state):
         "MODE": "pr",
         "PR_NUMBER": "7",
         "FORCE": "false",
+        "REQUESTER": "maintainer",
         "SKIP_PATHS": INPUTS["skip-paths"]["default"],
     }
     return run_script("gate", {**base_env, **env}, state)
+
+
+@pytest.mark.parametrize("permission", ["read", "none"])
+def test_gate_ignores_requesters_without_write_access(permission):
+    # Anyone can approve on a public repository.
+    r = gate({}, {"pr": pr(), "files": ["a.py"], "permission": permission})
+    assert r["outputs"]["scan"] == "false"
+    assert called(r, "pulls.get") == []
+
+
+@pytest.mark.parametrize("permission", ["write", "admin"])
+def test_gate_accepts_requesters_with_write_access(permission):
+    r = gate({}, {"pr": pr(), "files": ["a.py"], "permission": permission})
+    assert r["outputs"]["scan"] == "true"
+
+
+def test_gate_without_requester_skips():
+    r = gate({"REQUESTER": ""}, {"pr": pr(), "files": ["a.py"]})
+    assert r["outputs"]["scan"] == "false"
 
 
 def pr(state="open", fork=False):

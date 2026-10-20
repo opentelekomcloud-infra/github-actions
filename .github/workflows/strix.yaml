@@ -17,10 +17,15 @@ on:
         default: ""
         type: string
       force:
-        description: "Scan even if this commit already has a strix status (explicit label or manual run)"
+        description: "Scan even if this commit was already scanned (explicit label or manual run)"
         required: false
         default: false
         type: boolean
+      requester:
+        description: "GitHub login that asked for the scan (reviewer, labeller or actor); needs write access (mode pr)"
+        required: false
+        default: ""
+        type: string
       scan-mode:
         required: false
         default: "quick"
@@ -97,6 +102,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           PR_NUMBER: ${{ inputs.pr-number }}
           FORCE: ${{ inputs.force }}
+          REQUESTER: ${{ inputs.requester }}
           SKIP_PATHS: ${{ inputs.skip-paths }}
         with:
           script: |
@@ -113,6 +119,10 @@ jobs:
 
             if (env.MODE === 'pr') {
               if (!/^[0-9]+$/.test(env.PR_NUMBER)) return out(false, 'no pull request number');
+              // On public repositories anyone can submit an approving review; it must not spend the LLM budget.
+              if (!env.REQUESTER) return out(false, 'no requester');
+              const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: env.REQUESTER });
+              if (!['admin', 'write'].includes(perm.permission)) return out(false, `${env.REQUESTER} has ${perm.permission} access, write is required`);
               const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: Number(env.PR_NUMBER) });
               if (pr.state !== 'open') return out(false, `PR #${pr.number} is ${pr.state}`);
               if (pr.head.repo?.full_name !== `${owner}/${repo}`) return out(false, 'fork PRs are never scanned');

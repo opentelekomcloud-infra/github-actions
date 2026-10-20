@@ -38,6 +38,7 @@ jobs:
       mode: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.pr_number == '')) && 'nightly' || 'pr' }}
       pr-number: ${{ format('{0}', github.event.pull_request.number || inputs.pr_number) }}
       force: ${{ github.event_name != 'pull_request_review' }}
+      requester: ${{ github.event.review.user.login || github.event.sender.login || github.actor }}
     secrets:
       llm-model: ${{ secrets.LITELLM_MODEL }}
       llm-api-key: ${{ secrets.LITELLM_KEY }}

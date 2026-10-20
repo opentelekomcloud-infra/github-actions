@@ -21,6 +21,7 @@ const github = {
     repos: {
       get: reply('repos.get', { private: !!state.private, default_branch: 'main' }),
       getBranch: reply('repos.getBranch', { commit: { sha: state.branchSha } }),
+      getCollaboratorPermissionLevel: reply('repos.getCollaboratorPermissionLevel', { permission: state.permission || 'write' }),
       compareCommitsWithBasehead: reply('repos.compareCommitsWithBasehead', state.compare === 'error' ? notFound() : state.compare),
       createCommitStatus: reply('repos.createCommitStatus', {}),
     },

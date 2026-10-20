@@ -20,7 +20,9 @@ workflow in each repository ([templates/strix-caller.yml](templates/strix-caller
 
 - Only the changed files are scanned (`--scope-mode diff`), `quick` mode, at most
   `$5` (`max-budget`) and `150` turns per agent, 45 minutes.
-- No scan at all for: fork PRs (never get secrets or the self-hosted runners), changes
+- No scan at all for: fork PRs (never get secrets or the self-hosted runners), requests
+  (approval, label, manual run) from an account without *write* access to the repository
+  (on public repositories anyone can approve), changes
   touching only `skip-paths` (docs, `*.md`, `*.rst`), and a PR commit that already has a
   completed scan (recorded in the PR comment; a scanner error does not count).
 - The scan runs on `ubuntu-dind` (at most 5 runners for the org), so nightly times are
