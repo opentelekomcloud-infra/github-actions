@@ -1,0 +1,370 @@
+name: Strix security scan
+
+# Reusable AI security scan. Callers decide WHEN (approval, label, nightly);
+# this workflow decides WHETHER (gate) and does the scan and the reporting.
+# Caller template: templates/strix-caller.yml.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "pr (scan one pull request) or nightly (scan the default branch since the last nightly)"
+        required: true
+        type: string
+      pr-number:
+        description: "Pull request number (mode pr)"
+        required: false
+        default: ""
+        type: string
+      force:
+        description: "Scan even if this commit already has a strix status (explicit label or manual run)"
+        required: false
+        default: false
+        type: boolean
+      scan-mode:
+        required: false
+        default: "quick"
+        type: string
+      fail-on:
+        description: "Lowest severity that fails the check: critical, high, medium, low, info"
+        required: false
+        default: "high"
+        type: string
+      max-budget:
+        description: "LLM spend cap per scan in USD"
+        required: false
+        default: "5"
+        type: string
+      max-turns:
+        required: false
+        default: "150"
+        type: string
+      skip-paths:
+        description: "Extended regex; a change set touching only matching paths is not scanned"
+        required: false
+        default: '^(docs?/|releasenotes/)|\.(md|rst)$|^(LICENSE|AUTHORS|ChangeLog)$'
+        type: string
+      runs-on:
+        description: "Runner label for the scan job; needs Docker"
+        required: false
+        default: "ubuntu-dind"
+        type: string
+      timeout-minutes:
+        required: false
+        default: 45
+        type: number
+      strix-version:
+        required: false
+        default: "1.7.0"
+        type: string
+      strix-sha256:
+        description: "sha256 of strix-<version>-linux-x86_64.tar.gz; re-verify against the release digest when bumping"
+        required: false
+        default: "b8cd7e84d63cbeff6726301a9e08fddedf40fc6a4edcdb4edda8a853b3312de6"
+        type: string
+    secrets:
+      llm-model:
+        required: true
+      llm-api-key:
+        required: true
+      llm-api-base:
+        required: false
+      report-key:
+        description: "Passphrase for the encrypted report artifact on public repositories; without it public repos keep no report"
+        required: false
+
+permissions: {}
+
+jobs:
+  gate:
+    # GitHub-hosted on purpose: fork PRs are rejected before anything reaches the self-hosted runners or the LLM key.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: read
+    outputs:
+      scan: ${{ steps.gate.outputs.scan }}
+      advance: ${{ steps.gate.outputs.advance }}
+      head-sha: ${{ steps.gate.outputs.head_sha }}
+      base-sha: ${{ steps.gate.outputs.base_sha }}
+      private: ${{ steps.gate.outputs.private }}
+      issue-number: ${{ steps.gate.outputs.issue_number }}
+    steps:
+      - id: gate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          MODE: ${{ inputs.mode }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          FORCE: ${{ inputs.force }}
+          SKIP_PATHS: ${{ inputs.skip-paths }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const env = process.env;
+            const skip = new RegExp(env.SKIP_PATHS);
+            const { data: repository } = await github.rest.repos.get({ owner, repo });
+            core.setOutput('private', String(repository.private));
+            const out = (scan, reason, extra = {}) => {
+              core.setOutput('scan', String(scan));
+              for (const [k, v] of Object.entries(extra)) core.setOutput(k, String(v));
+              core.notice(`${scan ? 'scan' : 'skip'}: ${reason}`);
+            };
+
+            if (env.MODE === 'pr') {
+              if (!/^[0-9]+$/.test(env.PR_NUMBER)) return out(false, 'no pull request number');
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: Number(env.PR_NUMBER) });
+              if (pr.state !== 'open') return out(false, `PR #${pr.number} is ${pr.state}`);
+              if (pr.head.repo?.full_name !== `${owner}/${repo}`) return out(false, 'fork PRs are never scanned');
+              const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number, per_page: 100 });
+              if (files.every(f => skip.test(f.filename))) return out(false, 'only skip-paths changed');
+              if (env.FORCE !== 'true') {
+                const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, { owner, repo, ref: pr.head.sha, per_page: 100 });
+                if (statuses.some(s => s.context === 'strix' && ['success', 'failure'].includes(s.state))) return out(false, `${pr.head.sha} already scanned`);
+              }
+              return out(true, `PR #${pr.number} at ${pr.head.sha}`, { head_sha: pr.head.sha, base_sha: pr.base.sha });
+            }
+
+            if (env.MODE !== 'nightly') throw new Error(`unknown mode ${env.MODE}`);
+            const branch = repository.default_branch;
+            const { data: head } = await github.rest.repos.getBranch({ owner, repo, branch });
+            const headSha = head.commit.sha;
+            const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', labels: 'strix-nightly', per_page: 100 });
+            const issue = issues.find(i => (i.body || '').includes('<!-- strix-nightly-tracking -->'));
+            const last = issue && /<!-- strix-last-scanned: ([0-9a-f]{40}) -->/.exec(issue.body)?.[1];
+            const extra = { head_sha: headSha, issue_number: issue ? issue.number : '' };
+            if (!last) return out(false, 'no baseline yet; recording the current head', { ...extra, advance: true });
+            if (last === headSha) return out(false, `no new commits on ${branch}`, extra);
+            let cmp;
+            try {
+              ({ data: cmp } = await github.rest.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${last}...${headSha}` }));
+            } catch (e) {
+              return out(false, `last scanned commit ${last} is unreachable; re-baselining`, { ...extra, advance: true });
+            }
+            if (cmp.status !== 'ahead') return out(false, `${branch} is ${cmp.status} of ${last}; re-baselining`, { ...extra, advance: true });
+            if ((cmp.files || []).every(f => skip.test(f.filename))) return out(false, 'only skip-paths changed', { ...extra, advance: true });
+            return out(true, `${cmp.ahead_by} new commit(s) on ${branch}`, { ...extra, base_sha: last });
+
+  scan:
+    needs: gate
+    if: needs.gate.outputs.scan == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    container:
+      image: catthehacker/ubuntu:act-24.04
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      rc: ${{ steps.scan.outputs.rc }}
+      summary: ${{ steps.summary.outputs.summary }}
+    env:
+      HEAD_SHA: ${{ needs.gate.outputs.head-sha }}
+      BASE_SHA: ${{ needs.gate.outputs.base-sha }}
+    steps:
+      - name: Mark commit as being scanned
+        if: inputs.mode == 'pr'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: process.env.HEAD_SHA, context: 'strix', state: 'pending',
+              description: 'Strix scan running',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.head-sha }}
+          fetch-depth: 0
+          # Strix mounts the checkout writable into its sandbox; no token may sit in .git/config.
+          persist-credentials: false
+
+      - name: Install Strix (pinned version, hash-verified)
+        env:
+          STRIX_VERSION: ${{ inputs.strix-version }}
+          STRIX_SHA256: ${{ inputs.strix-sha256 }}
+        run: |
+          set -eu
+          archive="strix-${STRIX_VERSION}-linux-x86_64.tar.gz"
+          curl -fsSL --retry 3 -o "/tmp/${archive}" "https://github.com/usestrix/strix/releases/download/v${STRIX_VERSION}/${archive}"
+          echo "${STRIX_SHA256}  /tmp/${archive}" | sha256sum --check -
+          install_dir="${HOME}/.local/bin"
+          mkdir -p "${install_dir}"
+          tar -xzf "/tmp/${archive}" -C /tmp
+          mv "/tmp/strix-${STRIX_VERSION}-linux-x86_64" "${install_dir}/strix"
+          chmod 755 "${install_dir}/strix"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/strix" --version
+
+      - name: Run Strix
+        id: scan
+        env:
+          STRIX_LLM: ${{ secrets.llm-model }}
+          LLM_API_KEY: ${{ secrets.llm-api-key }}
+          LLM_API_BASE: ${{ secrets.llm-api-base }}
+          STRIX_REASONING_EFFORT: "medium"
+          STRIX_TELEMETRY: "0"
+          SCAN_MODE: ${{ inputs.scan-mode }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          MAX_BUDGET: ${{ inputs.max-budget }}
+          MAX_TURNS: ${{ inputs.max-turns }}
+        run: |
+          set -u
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          diff_base=$(git merge-base "${BASE_SHA}" "${HEAD_SHA}") || { echo "::error::no merge base between ${BASE_SHA} and ${HEAD_SHA}"; exit 1; }
+          echo "scanning ${diff_base}..${HEAD_SHA}"
+          # Console output can describe unfixed findings; on public repositories the job log is world-readable.
+          strix -n -t ./ --scan-mode "${SCAN_MODE}" --scope-mode diff --diff-base "${diff_base}" \
+            --fail-on "${FAIL_ON}" --max-budget "${MAX_BUDGET}" --max-turns "${MAX_TURNS}" \
+            > /tmp/strix-console.log 2>&1
+          rc=$?
+          echo "strix exit code ${rc}"
+          echo "rc=${rc}" >> "${GITHUB_OUTPUT}"
+
+      - name: Summarise findings
+        id: summary
+        if: always() && steps.scan.outcome != 'skipped'
+        env:
+          PRIVATE: ${{ needs.gate.outputs.private }}
+        shell: python3 {0}
+        run: |
+          import glob, json, os
+          runs = sorted(glob.glob("strix_runs/*/vulnerabilities.json"), key=os.path.getmtime)
+          vulns = json.load(open(runs[-1])) if runs else []
+          counts = {}
+          for v in vulns:
+              sev = str(v.get("severity", "unknown")).lower()
+              counts[sev] = counts.get(sev, 0) + 1
+          summary = {"counts": counts, "total": len(vulns), "report": bool(runs)}
+          if os.environ["PRIVATE"] == "true":
+              summary["findings"] = [{"severity": str(v.get("severity", "")).lower(), "title": str(v.get("title", ""))[:200]} for v in vulns][:20]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("summary=" + json.dumps(summary) + "\n")
+          print("findings by severity:", counts or "none")
+
+      - name: Keep the report (private repository)
+        if: always() && needs.gate.outputs.private == 'true' && steps.scan.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: strix-report-${{ needs.gate.outputs.head-sha }}
+          path: |
+            strix_runs/
+            /tmp/strix-console.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Encrypt the report (public repository)
+        id: encrypt
+        if: always() && needs.gate.outputs.private != 'true' && steps.scan.outcome != 'skipped'
+        env:
+          REPORT_KEY: ${{ secrets.report-key }}
+        run: |
+          set -eu
+          if [ -z "${REPORT_KEY}" ]; then echo "no report-key: the report is not kept on a public repository"; exit 0; fi
+          tar -czf - strix_runs /tmp/strix-console.log 2>/dev/null \
+            | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:REPORT_KEY -out /tmp/strix-report.tar.gz.enc
+          echo "file=/tmp/strix-report.tar.gz.enc" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload the encrypted report
+        if: always() && steps.encrypt.outputs.file != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: strix-report-${{ needs.gate.outputs.head-sha }}.enc
+          path: ${{ steps.encrypt.outputs.file }}
+          retention-days: 14
+
+      - name: Result
+        if: always() && steps.scan.outcome != 'skipped'
+        env:
+          RC: ${{ steps.scan.outputs.rc }}
+          FAIL_ON: ${{ inputs.fail-on }}
+        run: |
+          case "${RC}" in
+            0) echo "no findings at or above ${FAIL_ON}" ;;
+            2) echo "::error::findings at or above ${FAIL_ON}; see the PR comment or tracking issue"; exit 1 ;;
+            *) echo "::error::scanner error (exit ${RC:-none}), not a finding; re-run the workflow"; exit 1 ;;
+          esac
+
+  report:
+    needs: [gate, scan]
+    if: always() && (needs.gate.outputs.scan == 'true' || needs.gate.outputs.advance == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+      statuses: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          MODE: ${{ inputs.mode }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          SCANNED: ${{ needs.gate.outputs.scan }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+          RC: ${{ needs.scan.outputs.rc }}
+          SUMMARY: ${{ needs.scan.outputs.summary }}
+          HEAD_SHA: ${{ needs.gate.outputs.head-sha }}
+          BASE_SHA: ${{ needs.gate.outputs.base-sha }}
+          PRIVATE: ${{ needs.gate.outputs.private }}
+          ISSUE_NUMBER: ${{ needs.gate.outputs.issue-number }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const env = process.env;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const summary = env.SUMMARY ? JSON.parse(env.SUMMARY) : { counts: {}, total: 0 };
+            const order = ['critical', 'high', 'medium', 'low', 'info'];
+            const countText = summary.total
+              ? order.filter(s => summary.counts[s]).map(s => `${summary.counts[s]} ${s}`).join(', ')
+              : 'no findings';
+            // 0 = clean, 2 = findings at/above the threshold, anything else (or a cancelled/timed-out job) = scanner error.
+            const verdict = env.RC === '0' ? 'pass' : env.RC === '2' ? 'findings' : 'error';
+            const short = env.HEAD_SHA.slice(0, 8);
+            const details = env.PRIVATE === 'true'
+              ? (summary.findings || []).map(f => `- **${f.severity}** ${f.title}`).join('\n')
+              : '_Public repository: details are not posted. Maintainers can decrypt the run artifact with `STRIX_REPORT_KEY`._';
+            const headline = {
+              pass: `:white_check_mark: no findings at or above **${env.FAIL_ON}** (${countText})`,
+              findings: `:x: findings at or above **${env.FAIL_ON}**: ${countText}`,
+              error: ':warning: the scanner did not finish (error, timeout or cancel); this is not a finding, re-run the workflow',
+            }[verdict];
+
+            if (env.MODE === 'pr') {
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: env.HEAD_SHA, context: 'strix',
+                state: { pass: 'success', findings: 'failure', error: 'error' }[verdict],
+                description: verdict === 'error' ? 'scanner error' : countText.slice(0, 140),
+                target_url: runUrl,
+              });
+              const marker = '<!-- strix-report -->';
+              const body = [marker, `### Strix security scan of \`${short}\``, '', headline, '',
+                summary.total ? details : '', '', `[Workflow run](${runUrl}) · re-scan after new commits: add the \`strix-scan\` label or re-approve.`].join('\n');
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: Number(env.PR_NUMBER), per_page: 100 });
+              const mine = comments.find(c => c.user?.type === 'Bot' && (c.body || '').includes(marker));
+              if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+              else await github.rest.issues.createComment({ owner, repo, issue_number: Number(env.PR_NUMBER), body });
+              // Removed so that adding it again requests the next scan.
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: Number(env.PR_NUMBER), name: 'strix-scan' }).catch(() => {});
+              return;
+            }
+
+            // Nightly: the tracking issue holds the last scanned commit; it only moves on a completed scan or a baseline.
+            const advance = env.SCANNED !== 'true' || verdict !== 'error';
+            const issueBody = (sha) => [
+              '<!-- strix-nightly-tracking -->', `<!-- strix-last-scanned: ${sha} -->`,
+              'Nightly Strix scan of the default branch. Each scan covers the commits since the previous one; results are added as comments.',
+              '', `Last scanned commit: \`${sha}\``].join('\n');
+            let issueNumber = env.ISSUE_NUMBER ? Number(env.ISSUE_NUMBER) : null;
+            if (!issueNumber) {
+              const { data } = await github.rest.issues.create({ owner, repo, title: 'Strix nightly security scan', labels: ['strix-nightly'], body: issueBody(env.HEAD_SHA) });
+              issueNumber = data.number;
+            } else if (advance) {
+              await github.rest.issues.update({ owner, repo, issue_number: issueNumber, body: issueBody(env.HEAD_SHA) });
+            }
+            if (env.SCANNED === 'true') {
+              const range = `\`${env.BASE_SHA.slice(0, 8)}..${short}\``;
+              await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber,
+                body: [`### ${range}`, '', headline, '', summary.total ? details : '', '', `[Workflow run](${runUrl})`].join('\n') });
+            }
