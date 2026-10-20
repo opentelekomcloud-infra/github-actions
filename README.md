@@ -22,15 +22,16 @@ workflow in each repository ([templates/strix-caller.yml](templates/strix-caller
   `$5` (`max-budget`) and `150` turns per agent, 45 minutes.
 - No scan at all for: fork PRs (never get secrets or the self-hosted runners), changes
   touching only `skip-paths` (docs, `*.md`, `*.rst`), and a PR commit that already has a
-  completed `strix` status.
+  completed scan (recorded in the PR comment; a scanner error does not count).
 - The scan runs on `ubuntu-dind` (at most 5 runners for the org), so nightly times are
   staggered per repository.
 
 **Result**
 
-- Commit status `strix`: `success`, `failure` (findings at or above `fail-on`, default
-  `high`) or `error` (the scanner itself failed; not a finding, re-run).
-- One PR comment, updated in place. On **public** repositories only counts are published;
+- One check, **`Strix scan`** (the scan job): green, or red for findings at or above
+  `fail-on` (default `high`) or a scanner error. Severity counts are in its job summary.
+- One PR comment, updated in place, saying which of the two a red check is (a scanner
+  error is not a finding: re-run). On **public** repositories only counts are published;
   the full report is kept only as an artifact encrypted with `STRIX_REPORT_KEY`
   (`openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:STRIX_REPORT_KEY -in strix-report.tar.gz.enc | tar -xz`).
   Without that secret, public repositories keep no report. Private repositories keep the

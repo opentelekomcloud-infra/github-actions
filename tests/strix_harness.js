@@ -21,7 +21,6 @@ const github = {
     repos: {
       get: reply('repos.get', { private: !!state.private, default_branch: 'main' }),
       getBranch: reply('repos.getBranch', { commit: { sha: state.branchSha } }),
-      listCommitStatusesForRef: reply('repos.listCommitStatusesForRef', state.statuses || []),
       compareCommitsWithBasehead: reply('repos.compareCommitsWithBasehead', state.compare === 'error' ? notFound() : state.compare),
       createCommitStatus: reply('repos.createCommitStatus', {}),
     },

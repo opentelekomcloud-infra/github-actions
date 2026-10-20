@@ -33,7 +33,6 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-      statuses: write
     uses: opentelekomcloud-infra/github-actions/.github/workflows/strix.yaml@v1
     with:
       mode: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.pr_number == '')) && 'nightly' || 'pr' }}

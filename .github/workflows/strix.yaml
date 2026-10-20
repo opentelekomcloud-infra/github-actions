@@ -83,7 +83,6 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
-      statuses: read
     outputs:
       scan: ${{ steps.gate.outputs.scan }}
       advance: ${{ steps.gate.outputs.advance }}
@@ -120,8 +119,10 @@ jobs:
               const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number, per_page: 100 });
               if (files.every(f => skip.test(f.filename))) return out(false, 'only skip-paths changed');
               if (env.FORCE !== 'true') {
-                const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, { owner, repo, ref: pr.head.sha, per_page: 100 });
-                if (statuses.some(s => s.context === 'strix' && ['success', 'failure'].includes(s.state))) return out(false, `${pr.head.sha} already scanned`);
+                // The report comment records the last completed scan; a scanner error does not count.
+                const done = new RegExp(`<!-- strix-scanned: ${pr.head.sha} (pass|findings) -->`);
+                const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: pr.number, per_page: 100 });
+                if (comments.some(c => c.user?.type === 'Bot' && done.test(c.body || ''))) return out(false, `${pr.head.sha} already scanned`);
               }
               return out(true, `PR #${pr.number} at ${pr.head.sha}`, { head_sha: pr.head.sha, base_sha: pr.base.sha });
             }
@@ -147,6 +148,7 @@ jobs:
             return out(true, `${cmp.ahead_by} new commit(s) on ${branch}`, { ...extra, base_sha: last });
 
   scan:
+    name: Strix scan
     needs: gate
     if: needs.gate.outputs.scan == 'true'
     runs-on: ${{ inputs.runs-on }}
@@ -155,7 +157,6 @@ jobs:
       image: catthehacker/ubuntu:act-24.04
     permissions:
       contents: read
-      statuses: write
     outputs:
       rc: ${{ steps.scan.outputs.rc }}
       summary: ${{ steps.summary.outputs.summary }}
@@ -163,17 +164,6 @@ jobs:
       HEAD_SHA: ${{ needs.gate.outputs.head-sha }}
       BASE_SHA: ${{ needs.gate.outputs.base-sha }}
     steps:
-      - name: Mark commit as being scanned
-        if: inputs.mode == 'pr'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            await github.rest.repos.createCommitStatus({
-              ...context.repo, sha: process.env.HEAD_SHA, context: 'strix', state: 'pending',
-              description: 'Strix scan running',
-              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-            });
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Never checkout untrusted PR head code in this secret-bearing workflow.
@@ -244,6 +234,10 @@ jobs:
               summary["findings"] = [{"severity": str(v.get("severity", "")).lower(), "title": str(v.get("title", ""))[:200]} for v in vulns][:20]
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write("summary=" + json.dumps(summary) + "\n")
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+                  fh.write("### Strix findings by severity\n\n")
+                  fh.write("".join(f"- {k}: {n}\n" for k, n in sorted(counts.items())) or "none\n")
           print("findings by severity:", counts or "none")
 
       - name: Keep the report (private repository)
@@ -296,7 +290,6 @@ jobs:
     permissions:
       pull-requests: write
       issues: write
-      statuses: write
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -334,14 +327,8 @@ jobs:
             }[verdict];
 
             if (env.MODE === 'pr') {
-              await github.rest.repos.createCommitStatus({
-                owner, repo, sha: env.HEAD_SHA, context: 'strix',
-                state: { pass: 'success', findings: 'failure', error: 'error' }[verdict],
-                description: verdict === 'error' ? 'scanner error' : countText.slice(0, 140),
-                target_url: runUrl,
-              });
               const marker = '<!-- strix-report -->';
-              const body = [marker, `### Strix security scan of \`${short}\``, '', headline, '',
+              const body = [marker, `<!-- strix-scanned: ${env.HEAD_SHA} ${verdict} -->`, `### Strix security scan of \`${short}\``, '', headline, '',
                 summary.total ? details : '', '', `[Workflow run](${runUrl}) · re-scan after new commits: add the \`strix-scan\` label or re-approve.`].join('\n');
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: Number(env.PR_NUMBER), per_page: 100 });
               const mine = comments.find(c => c.user?.type === 'Bot' && (c.body || '').includes(marker));

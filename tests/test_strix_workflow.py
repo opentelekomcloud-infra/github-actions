@@ -90,6 +90,15 @@ def pr(state="open", fork=False):
     }
 
 
+def scanned(verdict, sha=HEAD, bot=True):
+    return {
+        "id": 1,
+        "user": {"type": "Bot" if bot else "User"},
+        "body": "<!-- strix-report -->\n"
+        f"<!-- strix-scanned: {sha} {verdict} -->",
+    }
+
+
 # --- gate: pull requests -----------------------------------------------------
 
 
@@ -121,18 +130,14 @@ def test_gate_scans_a_code_change():
         ),
         (
             "already passed",
-            {
-                "pr": pr(),
-                "files": ["a.py"],
-                "statuses": [{"context": "strix", "state": "success"}],
-            },
+            {"pr": pr(), "files": ["a.py"], "comments": [scanned("pass")]},
         ),
         (
-            "already failed",
+            "already found something",
             {
                 "pr": pr(),
                 "files": ["a.py"],
-                "statuses": [{"context": "strix", "state": "failure"}],
+                "comments": [scanned("findings")],
             },
         ),
     ],
@@ -154,26 +159,22 @@ def test_gate_without_pr_number_skips():
 
 
 @pytest.mark.parametrize(
-    "statuses",
+    "comments",
     [
-        [{"context": "strix", "state": "error"}],
-        [{"context": "strix", "state": "pending"}],
-        [{"context": "other", "state": "success"}],
+        [scanned("error")],
+        [scanned("pass", sha=BASE)],
+        [scanned("pass", bot=False)],
     ],
 )
-def test_gate_rescans_after_error_or_unrelated_status(statuses):
-    r = gate({}, {"pr": pr(), "files": ["a.py"], "statuses": statuses})
+def test_gate_rescans_after_error_older_commit_or_human_comment(comments):
+    r = gate({}, {"pr": pr(), "files": ["a.py"], "comments": comments})
     assert r["outputs"]["scan"] == "true"
 
 
 def test_gate_force_rescans_a_scanned_commit():
     r = gate(
         {"FORCE": "true"},
-        {
-            "pr": pr(),
-            "files": ["a.py"],
-            "statuses": [{"context": "strix", "state": "success"}],
-        },
+        {"pr": pr(), "files": ["a.py"], "comments": [scanned("pass")]},
     )
     assert r["outputs"]["scan"] == "true"
 
@@ -305,16 +306,22 @@ def summary(counts, findings=None):
 
 
 @pytest.mark.parametrize(
-    "rc,state",
-    [("0", "success"), ("2", "failure"), ("1", "error"), ("", "error")],
+    "rc,verdict",
+    [("0", "pass"), ("2", "findings"), ("1", "error"), ("", "error")],
 )
-def test_report_sets_the_commit_status(rc, state):
+def test_report_records_the_scanned_commit_and_verdict(rc, verdict):
     r = report({"RC": rc})
-    (status,) = called(r, "repos.createCommitStatus")
-    assert status["state"] == state
-    assert status["context"] == "strix"
-    assert status["sha"] == HEAD
-    assert len(status["description"]) <= 140
+    (comment,) = called(r, "issues.createComment")
+    assert f"<!-- strix-scanned: {HEAD} {verdict} -->" in comment["body"]
+    assert called(r, "repos.createCommitStatus") == []
+
+
+def test_report_marker_round_trips_through_the_gate():
+    r = report({"RC": "0"})
+    (comment,) = called(r, "issues.createComment")
+    posted = {"id": 3, "user": {"type": "Bot"}, "body": comment["body"]}
+    g = gate({}, {"pr": pr(), "files": ["a.py"], "comments": [posted]})
+    assert g["outputs"]["scan"] == "false"
 
 
 def test_report_public_repo_publishes_counts_only():
@@ -379,7 +386,6 @@ def test_nightly_report_creates_the_tracking_issue_on_baseline():
     assert f"<!-- strix-last-scanned: {HEAD} -->" in issue["body"]
     assert issue["labels"] == ["strix-nightly"]
     assert called(r, "issues.createComment") == []
-    assert called(r, "repos.createCommitStatus") == []
 
 
 def test_nightly_report_advances_after_a_completed_scan():
