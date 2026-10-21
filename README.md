@@ -55,7 +55,8 @@ the current plan): `LITELLM_MODEL`, `LITELLM_KEY`, `LITELLM_API_URL`, and
 **Rollout**: `tools/rollout-strix.sh` lists the active repositories (dry run), and with
 `--apply` opens one PR per repository adding `.github/workflows/strix.yml`, creates the
 labels and, with `--set-secrets`, sets the secrets from the environment. It also removes
-the old per-push `ai-security-scan.yml`.
+the old per-push `ai-security-scan.yml`. Callers are pinned to an exact release (`--ref`,
+default `v1.2.0`), not to `v1`; re-run with `--ref vX.Y.Z` to roll out a newer one.
 
 **Bumping Strix**: change `strix-version` and `strix-sha256` together; take the sha256 from
 the release asset digest (`gh api repos/usestrix/strix/releases/tags/vX.Y.Z`) and confirm

@@ -12,7 +12,8 @@
 set -euo pipefail
 
 ORG="opentelekomcloud-infra"
-REF="v1"
+# An exact release, not the moving v1 tag: callers get workflow changes only via a reviewed bump.
+REF="v1.2.0"
 ACTIVE_DAYS=180
 APPLY=false
 SET_SECRETS=false
@@ -101,7 +102,7 @@ for repo in $candidates; do
 
   base_sha=$(gh api "repos/$full/git/ref/heads/$default_branch" --jq .object.sha)
   gh api -X POST "repos/$full/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$base_sha" >/dev/null
-  content=$(sed -e "s|__CRON__|$cron|" -e "s|strix.yaml@v1|strix.yaml@$REF|" "$TEMPLATE" | base64 | tr -d '\n')
+  content=$(sed -e "s|__CRON__|$cron|" -e "s|strix.yaml@[^[:space:]]*|strix.yaml@$REF|" "$TEMPLATE" | base64 | tr -d '\n')
   gh api -X PUT "repos/$full/contents/$WORKFLOW_PATH" -f branch="$BRANCH" \
     -f message="ci: run the Strix security scan before merge and nightly" -f content="$content" >/dev/null
   if legacy_sha=$(gh api "repos/$full/contents/$LEGACY_PATH?ref=$BRANCH" --jq .sha 2>/dev/null); then
