@@ -1,0 +1,46 @@
+name: strix
+
+# Strix AI security scan, run once per pull request before merge plus nightly.
+# Logic lives in opentelekomcloud-infra/github-actions/.github/workflows/strix.yaml.
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request to scan; empty runs the nightly scan of the default branch"
+        required: false
+        default: ""
+  schedule:
+    - cron: "__CRON__"
+
+permissions: {}
+
+concurrency:
+  group: strix-${{ github.event.pull_request.number || inputs.pr_number || 'nightly' }}
+  cancel-in-progress: true
+
+jobs:
+  strix:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'strix-scan')
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    uses: opentelekomcloud-infra/github-actions/.github/workflows/strix.yaml@v1.2.0
+    with:
+      mode: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.pr_number == '')) && 'nightly' || 'pr' }}
+      pr-number: ${{ format('{0}', github.event.pull_request.number || inputs.pr_number) }}
+      force: ${{ github.event_name != 'pull_request_review' }}
+      requester: ${{ github.event.review.user.login || github.event.sender.login || github.actor }}
+    secrets:
+      llm-model: ${{ secrets.LITELLM_MODEL }}
+      llm-api-key: ${{ secrets.LITELLM_KEY }}
+      llm-api-base: ${{ secrets.LITELLM_API_URL }}
+      report-key: ${{ secrets.STRIX_REPORT_KEY }}

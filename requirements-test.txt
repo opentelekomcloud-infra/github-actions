@@ -5,3 +5,4 @@ openstacksdk
 pytest
 requests
 requestsexceptions
+pyyaml
