@@ -182,6 +182,7 @@ def test_gate_without_pr_number_skips():
     "comments",
     [
         [scanned("error")],
+        [scanned("timeout")],
         [scanned("pass", sha=BASE)],
         [scanned("pass", bot=False)],
     ],
@@ -306,6 +307,7 @@ def report(env, state=None):
         "MODE": "pr",
         "PR_NUMBER": "7",
         "FAIL_ON": "high",
+        "SCAN_TIMEOUT": "35",
         "SCANNED": "true",
         "SCAN_RESULT": "success",
         "RC": "0",
@@ -327,13 +329,36 @@ def summary(counts, findings=None):
 
 @pytest.mark.parametrize(
     "rc,verdict",
-    [("0", "pass"), ("2", "findings"), ("1", "error"), ("", "error")],
+    [
+        ("0", "pass"),
+        ("2", "findings"),
+        ("124", "timeout"),
+        ("1", "error"),
+        ("", "error"),
+    ],
 )
 def test_report_records_the_scanned_commit_and_verdict(rc, verdict):
     r = report({"RC": rc})
     (comment,) = called(r, "issues.createComment")
     assert f"<!-- strix-scanned: {HEAD} {verdict} -->" in comment["body"]
     assert called(r, "repos.createCommitStatus") == []
+
+
+def test_report_timeout_shows_partial_findings():
+    r = report(
+        {
+            "RC": "124",
+            "PRIVATE": "true",
+            "SUMMARY": summary(
+                {"medium": 1},
+                findings=[{"severity": "medium", "title": "XSS in y"}],
+            ),
+        }
+    )
+    (comment,) = called(r, "issues.createComment")
+    assert "35-minute limit" in comment["body"]
+    assert "incomplete" in comment["body"]
+    assert "**medium** XSS in y" in comment["body"]
 
 
 def test_report_marker_round_trips_through_the_gate():
@@ -424,8 +449,10 @@ def test_nightly_report_advances_after_a_completed_scan():
     assert LAST[:8] in comment["body"] and HEAD[:8] in comment["body"]
 
 
-def test_nightly_report_keeps_the_marker_when_the_scan_errored():
-    r = nightly_report({"ISSUE_NUMBER": "5", "BASE_SHA": LAST, "RC": "1"})
+@pytest.mark.parametrize("rc", ["1", "124"])
+def test_nightly_report_keeps_the_marker_when_the_scan_did_not_finish(rc):
+    # An incomplete scan must not move the baseline past unscanned commits.
+    r = nightly_report({"ISSUE_NUMBER": "5", "BASE_SHA": LAST, "RC": rc})
     assert called(r, "issues.update") == []
     assert len(called(r, "issues.createComment")) == 1
 
@@ -494,19 +521,136 @@ def test_summary_without_report(tmp_path):
     }
 
 
-@pytest.mark.parametrize("rc,code", [("0", 0), ("2", 1), ("1", 1), ("", 1)])
+@pytest.mark.parametrize(
+    "rc,code", [("0", 0), ("2", 1), ("124", 1), ("1", 1), ("", 1)]
+)
 def test_result_step_exit_codes(rc, code):
     proc = subprocess.run(
         ["bash", "-c", step("scan", "Result")["run"]],
-        env={**os.environ, "RC": rc, "FAIL_ON": "high"},
+        env={**os.environ, "RC": rc, "FAIL_ON": "high", "SCAN_TIMEOUT": "35"},
         capture_output=True,
         text=True,
     )
     assert proc.returncode == code
     if rc == "2":
         assert "findings at or above high" in proc.stdout
-    if code and rc != "2":
+    elif rc == "124":
+        assert "35-minute limit" in proc.stdout
+    elif code:
         assert "scanner error" in proc.stdout
+
+
+def test_scan_limit_leaves_room_for_the_report():
+    assert INPUTS["scan-timeout-minutes"]["default"] + 5 <= INPUTS[
+        "timeout-minutes"
+    ]["default"]
+
+
+TIMEOUT = shutil.which("timeout") or shutil.which("gtimeout")
+
+
+def run_scan(tmp_path, model, strix_body, limit="1"):
+    """Run the 'Run Strix' step in a throwaway repository, fake strix."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.name=t",
+           "-c", "user.email=t@t"]
+    subprocess.run(git[:3] + ["init", "-q"], check=True)
+    shas = []
+    for i in range(2):
+        (repo / "f.py").write_text(str(i))
+        subprocess.run(git + ["add", "f.py"], check=True)
+        subprocess.run(git + ["commit", "-qm", str(i)], check=True)
+        shas.append(
+            subprocess.run(
+                git + ["rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+        )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "strix"
+    fake.write_text(
+        "#!/bin/bash\n"
+        'echo "$STRIX_LLM $LLM_DISABLE_STREAMING $*" > "$RECORD"\n'
+        + strix_body
+    )
+    fake.chmod(0o755)
+    if os.path.basename(TIMEOUT) != "timeout":
+        (bindir / "timeout").symlink_to(TIMEOUT)
+    out = tmp_path / "out"
+    out.write_text("")
+    record = tmp_path / "record"
+    s = step("scan", "Run Strix")
+    env = {
+        k: v for k, v in s["env"].items() if "${{" not in str(v)
+    }
+    env.update(
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        HOME=str(tmp_path),
+        GITHUB_WORKSPACE=str(repo),
+        GITHUB_OUTPUT=str(out),
+        RECORD=str(record),
+        STRIX_LLM=model,
+        SCAN_MODE="quick",
+        FAIL_ON="high",
+        MAX_BUDGET="5",
+        MAX_TURNS="150",
+        SCAN_TIMEOUT=limit,
+        BASE_SHA=shas[0],
+        HEAD_SHA=shas[1],
+    )
+    subprocess.run(
+        ["bash", "-e", "-c", s["run"]], cwd=repo, env=env, check=True,
+        capture_output=True,
+    )
+    return out.read_text().strip(), record.read_text().split()
+
+
+@pytest.mark.skipif(TIMEOUT is None, reason="coreutils timeout not installed")
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        # A bare proxy alias must take the LiteLLM route, the only one
+        # that sees the proxy's cost.
+        ("recommended", "litellm_proxy/recommended"),
+        ("litellm_proxy/qwen3.8-27b", "litellm_proxy/qwen3.8-27b"),
+        ("anthropic/claude-sonnet-4", "anthropic/claude-sonnet-4"),
+    ],
+)
+def test_scan_routes_the_model_so_the_budget_is_enforced(
+    tmp_path, model, expected
+):
+    out, rec = run_scan(tmp_path, model, "exit 0\n")
+    assert out == "rc=0"
+    assert rec[0] == expected
+    # Streamed replies lose the proxy-reported cost; --max-budget would
+    # never trip.
+    assert rec[1] == "true"
+    assert rec[rec.index("--max-budget") + 1] == "5"
+
+
+@pytest.mark.skipif(TIMEOUT is None, reason="coreutils timeout not installed")
+@pytest.mark.parametrize("rc", ["1", "2"])
+def test_scan_records_a_failing_exit_code_under_bash_e(tmp_path, rc):
+    # GitHub runs steps with bash -e; a findings exit must still reach the
+    # output.
+    out, _ = run_scan(tmp_path, "recommended", f"exit {rc}\n")
+    assert out == f"rc={rc}"
+
+
+@pytest.mark.skipif(TIMEOUT is None, reason="coreutils timeout not installed")
+def test_scan_is_interrupted_at_the_limit_and_reports_124(tmp_path):
+    # The fake scanner writes its partial report on SIGINT, like strix does.
+    body = (
+        "trap 'mkdir -p strix_runs/r;"
+        " echo [] > strix_runs/r/vulnerabilities.json;"
+        " exit 130' INT\n"
+        "sleep 30 & wait\n"
+    )
+    out, _ = run_scan(tmp_path, "recommended", body, limit="0.02")
+    assert out == "rc=124"
+    assert (tmp_path / "repo/strix_runs/r/vulnerabilities.json").exists()
 
 
 @pytest.mark.skipif(

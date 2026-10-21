@@ -55,8 +55,14 @@ on:
         default: "ubuntu-dind"
         type: string
       timeout-minutes:
+        description: "Hard limit of the scan job; keep it above scan-timeout-minutes so the report still runs"
         required: false
         default: 45
+        type: number
+      scan-timeout-minutes:
+        description: "Strix is interrupted after this many minutes; partial findings are still reported"
+        required: false
+        default: 35
         type: number
       strix-version:
         required: false
@@ -207,20 +213,31 @@ jobs:
           LLM_API_BASE: ${{ secrets.llm-api-base }}
           STRIX_REASONING_EFFORT: "medium"
           STRIX_TELEMETRY: "0"
+          # --max-budget only counts cost Strix can see. A proxy alias such as `recommended` is not in LiteLLM's
+          # price map; the cost reaches Strix only from the proxy's response-cost header, and LiteLLM drops that
+          # header from streamed replies.
+          LLM_DISABLE_STREAMING: "true"
           SCAN_MODE: ${{ inputs.scan-mode }}
           FAIL_ON: ${{ inputs.fail-on }}
           MAX_BUDGET: ${{ inputs.max-budget }}
           MAX_TURNS: ${{ inputs.max-turns }}
+          SCAN_TIMEOUT: ${{ inputs.scan-timeout-minutes }}
         run: |
           set -u
+          # A bare alias would go through the plain OpenAI client, which never reports cost; the LiteLLM proxy
+          # route does. Names that already carry a provider prefix are left alone.
+          case "${STRIX_LLM}" in */*) ;; *) export STRIX_LLM="litellm_proxy/${STRIX_LLM}" ;; esac
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           diff_base=$(git merge-base "${BASE_SHA}" "${HEAD_SHA}") || { echo "::error::no merge base between ${BASE_SHA} and ${HEAD_SHA}"; exit 1; }
-          echo "scanning ${diff_base}..${HEAD_SHA}"
-          # Console output can describe unfixed findings; on public repositories the job log is world-readable.
-          strix -n -t ./ --scan-mode "${SCAN_MODE}" --scope-mode diff --diff-base "${diff_base}" \
+          echo "scanning ${diff_base}..${HEAD_SHA}, limit ${SCAN_TIMEOUT} min"
+          # Interrupted (SIGINT) before the job limit, so the findings so far are still summarised and reported;
+          # timeout(1) exits 124 then. Console output can describe unfixed findings; public job logs are world-readable.
+          # Steps run under bash -e; without `|| rc=$?` a findings exit (2) would end the step before rc is recorded.
+          rc=0
+          timeout -s INT -k 2m "${SCAN_TIMEOUT}m" \
+            strix -n -t ./ --scan-mode "${SCAN_MODE}" --scope-mode diff --diff-base "${diff_base}" \
             --fail-on "${FAIL_ON}" --max-budget "${MAX_BUDGET}" --max-turns "${MAX_TURNS}" \
-            > /tmp/strix-console.log 2>&1
-          rc=$?
+            > /tmp/strix-console.log 2>&1 || rc=$?
           echo "strix exit code ${rc}"
           echo "rc=${rc}" >> "${GITHUB_OUTPUT}"
 
@@ -285,10 +302,12 @@ jobs:
         env:
           RC: ${{ steps.scan.outputs.rc }}
           FAIL_ON: ${{ inputs.fail-on }}
+          SCAN_TIMEOUT: ${{ inputs.scan-timeout-minutes }}
         run: |
           case "${RC}" in
             0) echo "no findings at or above ${FAIL_ON}" ;;
             2) echo "::error::findings at or above ${FAIL_ON}; see the PR comment or tracking issue"; exit 1 ;;
+            124) echo "::error::scan stopped at the ${SCAN_TIMEOUT}-minute limit; findings so far are in the report"; exit 1 ;;
             *) echo "::error::scanner error (exit ${RC:-none}), not a finding; re-run the workflow"; exit 1 ;;
           esac
 
@@ -305,6 +324,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           PR_NUMBER: ${{ inputs.pr-number }}
           FAIL_ON: ${{ inputs.fail-on }}
+          SCAN_TIMEOUT: ${{ inputs.scan-timeout-minutes }}
           SCANNED: ${{ needs.gate.outputs.scan }}
           SCAN_RESULT: ${{ needs.scan.result }}
           RC: ${{ needs.scan.outputs.rc }}
@@ -323,8 +343,9 @@ jobs:
             const countText = summary.total
               ? order.filter(s => summary.counts[s]).map(s => `${summary.counts[s]} ${s}`).join(', ')
               : 'no findings';
-            // 0 = clean, 2 = findings at/above the threshold, anything else (or a cancelled/timed-out job) = scanner error.
-            const verdict = env.RC === '0' ? 'pass' : env.RC === '2' ? 'findings' : 'error';
+            // 0 = clean, 2 = findings at/above the threshold, 124 = stopped at the scan limit (incomplete, partial
+            // findings), anything else (or a cancelled job) = scanner error. Only pass/findings count as scanned.
+            const verdict = { '0': 'pass', '2': 'findings', '124': 'timeout' }[env.RC] || 'error';
             const short = env.HEAD_SHA.slice(0, 8);
             const details = env.PRIVATE === 'true'
               ? (summary.findings || []).map(f => `- **${f.severity}** ${f.title}`).join('\n')
@@ -332,7 +353,8 @@ jobs:
             const headline = {
               pass: `:white_check_mark: no findings at or above **${env.FAIL_ON}** (${countText})`,
               findings: `:x: findings at or above **${env.FAIL_ON}**: ${countText}`,
-              error: ':warning: the scanner did not finish (error, timeout or cancel); this is not a finding, re-run the workflow',
+              timeout: `:hourglass: the scan stopped at the ${env.SCAN_TIMEOUT}-minute limit and is incomplete; findings so far: ${countText}`,
+              error: ':warning: the scanner did not finish (error or cancel); this is not a finding, re-run the workflow',
             }[verdict];
 
             if (env.MODE === 'pr') {
@@ -349,7 +371,7 @@ jobs:
             }
 
             // Nightly: the tracking issue holds the last scanned commit; it only moves on a completed scan or a baseline.
-            const advance = env.SCANNED !== 'true' || verdict !== 'error';
+            const advance = env.SCANNED !== 'true' || verdict === 'pass' || verdict === 'findings';
             const issueBody = (sha) => [
               '<!-- strix-nightly-tracking -->', `<!-- strix-last-scanned: ${sha} -->`,
               'Nightly Strix scan of the default branch. Each scan covers the commits since the previous one; results are added as comments.',

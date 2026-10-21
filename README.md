@@ -19,7 +19,14 @@ workflow in each repository ([templates/strix-caller.yml](templates/strix-caller
 **What it costs and what it skips**
 
 - Only the changed files are scanned (`--scope-mode diff`), `quick` mode, at most
-  `$5` (`max-budget`) and `150` turns per agent, 45 minutes.
+  `$5` (`max-budget`) and `150` turns per agent. Strix is interrupted after 35 minutes
+  (`scan-timeout-minutes`, inside the 45-minute job limit), so a slow LLM still yields a
+  report with the findings so far, marked *incomplete*; it does not count as scanned.
+- The budget is enforced from the cost the LiteLLM proxy reports per request, so the
+  proxy's model entries need `input_cost_per_token`/`output_cost_per_token`. A bare alias
+  in `LITELLM_MODEL` (e.g. `recommended`) is called as `litellm_proxy/<alias>` and without
+  streaming: Strix cannot price a proxy alias itself, and LiteLLM drops the proxy's cost
+  from streamed replies, which left `--max-budget` at $0 and never enforced.
 - No scan at all for: fork PRs (never get secrets or the self-hosted runners), requests
   (approval, label, manual run) from an account without *write* access to the repository
   (on public repositories anyone can approve), changes
@@ -31,9 +38,10 @@ workflow in each repository ([templates/strix-caller.yml](templates/strix-caller
 **Result**
 
 - One check, **`Strix scan`** (the scan job): green, or red for findings at or above
-  `fail-on` (default `high`) or a scanner error. Severity counts are in its job summary.
-- One PR comment, updated in place, saying which of the two a red check is (a scanner
-  error is not a finding: re-run). On **public** repositories only counts are published;
+  `fail-on` (default `high`), a scan stopped at the time limit, or a scanner error.
+  Severity counts are in its job summary.
+- One PR comment, updated in place, saying which of the three a red check is (a timeout
+  or scanner error is not a finding: re-run). On **public** repositories only counts are published;
   the full report is kept only as an artifact encrypted with `STRIX_REPORT_KEY`
   (`openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:STRIX_REPORT_KEY -in strix-report.tar.gz.enc | tar -xz`).
   Without that secret, public repositories keep no report. Private repositories keep the
