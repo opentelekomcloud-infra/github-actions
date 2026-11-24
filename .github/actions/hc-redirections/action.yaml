@@ -1,0 +1,306 @@
+name: "Help Center redirections"
+description: "Regenerate this repository's Help Center redirect maps from its merged content and open the pull request in system-config"
+inputs:
+  git_hosting:
+    description: "git hosting of the documentation repositories (github or gitea)"
+    required: false
+    default: "github"
+  environment:
+    description: "target Help Center edition (public, internal, swiss_public, swiss_internal)"
+    required: false
+    default: "public"
+  repository:
+    description: "documentation repository to regenerate (defaults to the repository this workflow runs in)"
+    required: false
+    default: ""
+  system_config_repo:
+    description: "GitHub repository that holds the docsportal overlays"
+    required: false
+    default: "opentelekomcloud-infra/system-config"
+  metadata_repo:
+    description: "git URL of the otc-metadata-rework checkout"
+    required: false
+    default: "https://gitea.eco.tsi-dev.otc-service.com/infra/otc-metadata-rework.git"
+  gitea_token:
+    description: "token with read access to the metadata repository"
+    required: true
+  app_id:
+    description: "GitHub App id with contents+pull-requests write on system_config_repo (preferred)"
+    required: false
+    default: ""
+  app_private_key:
+    description: "private key (PEM) of that GitHub App"
+    required: false
+    default: ""
+  github_token:
+    description: "fallback token with contents+pull-requests write on system_config_repo"
+    required: false
+    default: ""
+  python_version:
+    description: "Python version used for the generator"
+    required: false
+    default: "3.11"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Install PyYAML and the gh CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet --disable-pip-version-check PyYAML
+        python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+        # gh is not part of the runner image; the generator uses it for
+        # "gh pr create". GitHub-hosted runners ship it, self-hosted may not.
+        if ! command -v gh >/dev/null 2>&1; then
+          version=2.105.0
+          work=$(mktemp -d)
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${version}/gh_${version}_linux_amd64.tar.gz" \
+            | tar -xz -C "$work"
+          if ! install -m 0755 "$work/gh_${version}_linux_amd64/bin/gh" /usr/local/bin/gh 2>/dev/null; then
+            mkdir -p "$HOME/.local/bin"
+            install -m 0755 "$work/gh_${version}_linux_amd64/bin/gh" "$HOME/.local/bin/gh"
+            # GITHUB_PATH only applies to later steps, so this one has to put
+            # the directory on its own PATH as well - on a non-root runner the
+            # /usr/local/bin install above is what fails and lands us here
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          rm -rf "$work"
+        fi
+        command -v gh >/dev/null 2>&1 || {
+          echo "::error::the gh CLI is not available after the install step"
+          exit 1
+        }
+        gh --version | head -1
+
+    - name: Authenticate to GitHub
+      id: auth
+      shell: bash
+      env:
+        APP_ID: ${{ inputs.app_id }}
+        APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
+        PAT: ${{ inputs.github_token }}
+        SYSTEM_CONFIG_REPO: ${{ inputs.system_config_repo }}
+      run: |
+        set -euo pipefail
+        json_field() {
+          python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
+        }
+        if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+          command -v openssl >/dev/null 2>&1 || {
+            echo "::error::openssl is required to sign the GitHub App JWT"
+            exit 1
+          }
+          keyfile=$(mktemp)
+          chmod 600 "$keyfile"
+          # a PEM stored as a single line arrives with literal \n sequences
+          printf '%s' "$APP_PRIVATE_KEY" | sed 's/\\n/\n/g' > "$keyfile"
+          openssl pkey -in "$keyfile" -noout 2>/dev/null || {
+            echo "::error::app_private_key is not a valid PEM private key"
+            exit 1
+          }
+          base64url() {
+            openssl base64 -A | tr '+/' '-_' | tr -d '='
+          }
+          now=$(date +%s)
+          header=$(printf '{"alg":"RS256","typ":"JWT"}' | base64url)
+          payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' \
+            "$((now - 60))" "$((now + 540))" "$APP_ID" | base64url)
+          signature=$(printf '%s.%s' "$header" "$payload" \
+            | openssl dgst -sha256 -sign "$keyfile" | base64url)
+          rm -f "$keyfile"
+          jwt="$header.$payload.$signature"
+
+          if ! installation=$(curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $jwt" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${SYSTEM_CONFIG_REPO}/installation"); then
+            echo "::error::cannot resolve the GitHub App installation for ${SYSTEM_CONFIG_REPO} - is the App installed on that repository?"
+            exit 1
+          fi
+          installation_id=$(printf '%s' "$installation" | json_field id)
+          if ! grant=$(curl -fsS --max-time 30 -X POST \
+            -H "Authorization: Bearer $jwt" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"repositories\":[\"${SYSTEM_CONFIG_REPO##*/}\"],\"permissions\":{\"contents\":\"write\",\"pull_requests\":\"write\"}}" \
+            "https://api.github.com/app/installations/${installation_id}/access_tokens"); then
+            echo "::error::cannot mint an installation token - check the App permissions (Contents and Pull requests: read/write)"
+            exit 1
+          fi
+          token=$(printf '%s' "$grant" | json_field token)
+          # The token is written to $GITHUB_OUTPUT as a single line, so only
+          # whitespace and control characters matter - any of them would let the
+          # value inject further outputs. GitHub asks integrators to treat
+          # tokens as opaque (the stateless ghs_<app id>_<jwt> format is ~520
+          # characters long and contains dots), so this checks the property the
+          # file format needs instead of the token's shape.
+          if [ -z "$token" ] || [[ "$token" =~ [[:space:][:cntrl:]] ]]; then
+            echo "::error::the API returned an installation token with whitespace or control characters"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "authenticated as GitHub App ${APP_ID}, installation ${installation_id}"
+        elif [ -n "${PAT:-}" ]; then
+          token="$PAT"
+          if [ -z "$token" ] || [[ "$token" =~ [[:space:][:cntrl:]] ]]; then
+            echo "::error::github_token contains whitespace or control characters"
+            exit 1
+          fi
+          echo "::add-mask::$PAT"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "authenticated with the github_token input"
+        else
+          echo "::error::no GitHub credentials - set app_id + app_private_key (recommended) or github_token"
+          exit 1
+        fi
+    - name: Regenerate the redirections and open the pull request
+      shell: bash
+      env:
+        GIT_HOSTING: ${{ inputs.git_hosting }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        REPOSITORY: ${{ inputs.repository }}
+        SYSTEM_CONFIG_REPO: ${{ inputs.system_config_repo }}
+        METADATA_REPO: ${{ inputs.metadata_repo }}
+        GITEA_TOKEN: ${{ inputs.gitea_token }}
+        GH_TOKEN: ${{ steps.auth.outputs.token }}
+      run: |
+        set -euo pipefail
+        repository="${REPOSITORY:-$GITHUB_REPOSITORY}"
+        work="${RUNNER_TEMP:-/tmp}/hc-redirections"
+        rm -rf "$work"
+        mkdir -p "$work/docs"
+
+        # Credentials are handed to git through the environment (GIT_CONFIG_*),
+        # never written to a file: on a self-hosted runner whose $HOME survives
+        # the job, a --global extraheader would leave the tokens on disk. Each
+        # URL is configured in its plain and its .git form and scoped to its
+        # own repository, so the App token is not offered to other github.com
+        # requests this job happens to make.
+        gh_auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+        meta_auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITEA_TOKEN" | base64 | tr -d '\n')"
+        metadata_host=$(printf '%s' "$METADATA_REPO" | sed -E 's#^https?://([^/]+)/.*#\1#')
+        metadata_path=$(printf '%s' "$METADATA_REPO" | sed -E 's#^https?://[^/]+/##; s#\.git$##; s#/$##')
+        export GIT_CONFIG_COUNT=6
+        export GIT_CONFIG_KEY_0="http.https://github.com/${SYSTEM_CONFIG_REPO}.extraheader"
+        export GIT_CONFIG_VALUE_0="$gh_auth"
+        export GIT_CONFIG_KEY_1="http.https://github.com/${SYSTEM_CONFIG_REPO}.git.extraheader"
+        export GIT_CONFIG_VALUE_1="$gh_auth"
+        export GIT_CONFIG_KEY_2="http.https://${metadata_host}/${metadata_path}.extraheader"
+        export GIT_CONFIG_VALUE_2="$meta_auth"
+        export GIT_CONFIG_KEY_3="http.https://${metadata_host}/${metadata_path}.git.extraheader"
+        export GIT_CONFIG_VALUE_3="$meta_auth"
+        export GIT_CONFIG_KEY_4="user.name"
+        export GIT_CONFIG_VALUE_4="docs-redirections-bot"
+        export GIT_CONFIG_KEY_5="user.email"
+        export GIT_CONFIG_VALUE_5="docs-redirections-bot@users.noreply.github.com"
+        # The commit identity travels through the same mechanism: if git does
+        # not honour it, the clone would fail on authentication with a message
+        # that hides the real cause (git older than 2.31).
+        if [ -z "$(git config --get user.name || true)" ]; then
+          echo "::error::git does not honour GIT_CONFIG_* environment configuration (needs git >= 2.31)"
+          exit 1
+        fi
+
+        # A full clone: the generator fetches, checks out main, branches and
+        # pushes --force-with-lease. A single-branch shallow clone would not
+        # know the target branch and the lease would fail on a same-day re-run.
+        git clone --quiet "https://github.com/${SYSTEM_CONFIG_REPO}.git" \
+          "$work/system-config"
+        git clone --quiet --depth 1 "$METADATA_REPO" "$work/meta"
+
+        # The documentation content of this run is the job's own checkout (the
+        # merge commit on main). Copy it into the <org>/<repo> layout the
+        # generator resolves: with .git present the generator reuses it instead
+        # of cloning another copy, and --no-pull keeps the content as checked out.
+        # Only when the run is about this repository: staging our checkout under
+        # another repository's name would make the generator build that
+        # repository's maps from the wrong content (check_remote only warns), so
+        # -c clones it instead.
+        if [ "$repository" = "$GITHUB_REPOSITORY" ]; then
+          mkdir -p "$work/docs/${repository}"
+          cp -a "$GITHUB_WORKSPACE/." "$work/docs/${repository}/"
+          echo "source content: $(git -C "$GITHUB_WORKSPACE" log --oneline -1)"
+        else
+          # Another repository: clone it over https. The generator would use
+          # git@github.com:, which needs an SSH key this runner does not have,
+          # and the App token is scoped to system-config - so this works for
+          # public documentation repositories, which is what the org holds.
+          git clone --quiet --depth 1 "https://github.com/${repository}.git" \
+            "$work/docs/${repository}"
+          echo "source content: ${repository} cloned over https"
+        fi
+
+        # The generator itself lives in system-config main, so this action
+        # always runs the merged version of the tool. The commit is only known
+        # for the calling repository; for another one the generator describes
+        # the checkouts it cloned itself.
+        if [ "$repository" = "$GITHUB_REPOSITORY" ]; then
+          export HC_SOURCE_REPO="${repository}"
+          export HC_SOURCE_COMMIT="${GITHUB_SHA:-}"
+          export HC_SOURCE_REF="${GITHUB_REF:-}"
+        fi
+        set +e
+        python3 "$work/system-config/tools/generate_hc_redirections.py" \
+          -d "$work/docs" \
+          -m "$work/meta" \
+          -s "$work/system-config" \
+          -g "$GIT_HOSTING" \
+          -e "$ENVIRONMENT" \
+          -r "$repository" \
+          -c \
+          --no-pull \
+          --pr \
+          --verbose 2>&1 | tee "$work/run.log"
+        status=${PIPESTATUS[0]}
+        set -e
+        if [ "$status" -ne 0 ]; then
+          # a docs repository that does not feed this Help Center edition has
+          # no documents for -r: that is not a failure of this action
+          if grep -qE 'no document matches repository|no documents left to process' \
+            "$work/run.log"; then
+            echo "::notice::${repository} has no documents for the ${ENVIRONMENT} Help Center - nothing to do"
+            exit 0
+          fi
+          exit "$status"
+        fi
+        # A green step has to mean the pull request exists. The generator
+        # exits non-zero when --pr cannot be honoured, but this also covers a
+        # system-config main that still only warns: the generator leaves its
+        # branch checked out, so ask GitHub whether a pull request exists for it.
+        if grep -q 'no changes - the overlay is already up to date' "$work/run.log"; then
+          echo "::notice::no redirect map changed - no pull request needed"
+        else
+          branch=$(git -C "$work/system-config" rev-parse --abbrev-ref HEAD)
+          if [ -z "$branch" ] || [ "$branch" = "main" ] || [ "$branch" = "HEAD" ]; then
+            echo "::error::the generator did not leave a redirection branch behind - see the log above"
+            exit 1
+          fi
+          pr_url=$(gh pr list --repo "$SYSTEM_CONFIG_REPO" --head "$branch" \
+            --state open --json url --jq '.[0].url // ""')
+          if [ -z "$pr_url" ]; then
+            echo "::error::branch $branch was pushed but no open pull request exists for it"
+            exit 1
+          fi
+          echo "pull request: $pr_url"
+        fi
+
+        {
+          echo "### Help Center redirections"
+          echo ""
+          echo "| field | value |"
+          echo "| --- | --- |"
+          echo "| repository | \`$repository\` |"
+          echo "| edition | \`$ENVIRONMENT\` |"
+          echo ""
+          grep -E '^(SCOPE|[0-9]+ map file\(s\)|branch .* pushed|https://github\.com/[^ ]+/pull/[0-9]+|::notice::)' \
+            "$work/run.log" || true
+        } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
